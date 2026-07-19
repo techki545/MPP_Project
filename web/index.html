@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:,">
+  <title>儿童 SMPP 循证 Graph RAG 工作台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-block">
+      <div class="brand-mark" aria-hidden="true">E</div>
+      <div>
+        <p class="product-name">EvidenceGraph</p>
+        <p class="product-context">儿童 SMPP 循证工作台</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="model-status" class="model-status" data-state="idle">
+        <span class="status-dot" aria-hidden="true"></span>
+        模型未连接
+      </span>
+      <button id="focus-settings" class="icon-button" type="button" title="模型设置" aria-label="打开模型设置">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm8.5 4a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.5 1a9 9 0 0 0-2-1.2L15.5 3h-4l-.4 2.6a9 9 0 0 0-2 1.2l-2.5-1-2 3.4 2 1.6A7 7 0 0 0 6.5 12c0 .4 0 .8.1 1.2l-2 1.6 2 3.4 2.5-1a9 9 0 0 0 2 1.2l.4 2.6h4l.4-2.6a9 9 0 0 0 2-1.2l2.5 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2Z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="app-shell">
+    <section class="workbench" aria-label="循证分析工作台">
+      <aside class="control-rail">
+        <div class="rail-section question-section">
+          <div class="section-heading-row">
+            <label class="section-heading" for="clinical-question">临床问题</label>
+            <span id="question-count" class="character-count">0 / 500</span>
+          </div>
+          <textarea id="clinical-question" maxlength="500" rows="6" spellcheck="false"></textarea>
+          <button id="generate-answer" class="primary-button" type="button">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 4v16l15-8L5 4Zm2 3.3 8.8 4.7L7 16.7V7.3Z"/></svg>
+            <span>生成循证回答</span>
+          </button>
+          <div id="analysis-progress" class="analysis-progress" role="status" aria-live="polite"></div>
+        </div>
+
+        <div class="rail-section filter-section">
+          <div class="section-heading-row">
+            <h2 class="section-heading">证据筛选</h2>
+            <button id="toggle-all-types" class="text-button" type="button">全不选</button>
+          </div>
+          <div id="evidence-filters" class="evidence-filters" aria-label="证据类型筛选"></div>
+        </div>
+
+        <details id="model-settings" class="rail-section model-settings" open>
+          <summary class="section-heading">模型设置</summary>
+          <div class="settings-body">
+            <label class="field-label" for="api-key">API Key</label>
+            <div class="secret-field">
+              <input id="api-key" type="password" autocomplete="off" placeholder="sk-...">
+              <button id="toggle-key-visibility" class="field-icon-button" type="button" title="显示或隐藏 API Key" aria-label="显示或隐藏 API Key">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5C6.5 5 2.2 8.4 1 12c1.2 3.6 5.5 7 11 7s9.8-3.4 11-7c-1.2-3.6-5.5-7-11-7Zm0 12c-3.8 0-7.2-2.1-8.7-5 1.5-2.9 4.9-5 8.7-5s7.2 2.1 8.7 5c-1.5 2.9-4.9 5-8.7 5Zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z"/></svg>
+              </button>
+            </div>
+
+            <label class="field-label" for="base-url">Base URL</label>
+            <input id="base-url" type="url" value="https://api.openai.com/v1" spellcheck="false">
+
+            <label class="field-label" for="model-name">模型名称</label>
+            <input id="model-name" type="text" value="gpt-4o-mini" spellcheck="false">
+
+            <button id="test-model" class="secondary-button" type="button">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9.5 16.5-4-4 1.4-1.4 2.6 2.6 7.6-7.6 1.4 1.4-9 9Z"/></svg>
+              <span>测试连接</span>
+            </button>
+          </div>
+        </details>
+      </aside>
+
+      <section class="graph-workspace" aria-labelledby="graph-title">
+        <div class="workspace-header">
+          <div>
+            <p class="eyebrow">EVIDENCE GRAPH</p>
+            <h1 id="graph-title">证据关系图</h1>
+            <p id="graph-meta" class="workspace-meta">正在加载证据图...</p>
+          </div>
+          <div class="relation-legend" aria-label="关系图例">
+            <span><i class="legend-line supports"></i>支持</span>
+            <span><i class="legend-line updates"></i>更新</span>
+            <span><i class="legend-line supplements"></i>补充</span>
+            <span><i class="legend-line cautions"></i>警示</span>
+          </div>
+        </div>
+
+        <div class="graph-frame">
+          <svg id="evidence-graph" class="graph-stage" role="img" aria-label="证据节点与关系图"></svg>
+          <div id="graph-empty" class="graph-empty" hidden>当前筛选条件下没有证据</div>
+        </div>
+
+        <div id="analysis-chips" class="analysis-chips" aria-live="polite">
+          <span class="analysis-chip neutral">等待分析</span>
+        </div>
+
+        <section class="decision-strip" aria-labelledby="decision-title">
+          <div class="decision-accent" aria-hidden="true"></div>
+          <div>
+            <p id="decision-title" class="decision-label">证据合成</p>
+            <p id="decision-summary" class="decision-text">证据图加载后将在此显示规则分析结论。</p>
+          </div>
+        </section>
+      </section>
+
+      <aside class="evidence-rail">
+        <div class="evidence-inventory">
+          <div class="section-heading-row inventory-heading">
+            <div>
+              <p class="eyebrow">INVENTORY</p>
+              <h2 class="section-title">证据库存</h2>
+            </div>
+            <span id="visible-evidence-count" class="count-badge">0</span>
+          </div>
+          <div id="evidence-list" class="evidence-list" aria-live="polite"></div>
+        </div>
+
+        <section id="evidence-detail" class="evidence-detail" aria-labelledby="detail-title">
+          <p class="eyebrow">SELECTED EVIDENCE</p>
+          <h2 id="detail-title" class="section-title">证据详情</h2>
+          <p class="empty-state">尚未选择证据</p>
+        </section>
+      </aside>
+    </section>
+
+    <section class="report-section" aria-labelledby="report-title">
+      <div class="report-header">
+        <div>
+          <p class="eyebrow">AUDITABLE REPORT</p>
+          <h2 id="report-title">循证报告</h2>
+        </div>
+        <span id="report-model" class="report-model">尚未生成</span>
+      </div>
+
+      <div class="report-grid">
+        <section class="reasoning-column" aria-labelledby="reasoning-title">
+          <h3 id="reasoning-title">第一部分：循证推理过程</h3>
+          <div id="reasoning-steps" class="reasoning-steps">
+            <p class="empty-state">尚无推理结果</p>
+          </div>
+        </section>
+
+        <section class="answer-column" aria-labelledby="answer-title">
+          <div class="answer-heading-row">
+            <h3 id="answer-title">第二部分：综合回答</h3>
+            <span id="answer-grounding" class="grounding-badge">等待生成</span>
+          </div>
+          <div id="final-answer" class="final-answer">
+            <p class="empty-state">尚无综合回答</p>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    本页面为科研演示，当前证据来自内置示例知识库；输出不替代临床医生的专业判断。
+  </footer>
+
+  <div id="toast" class="toast" role="alert" aria-live="assertive" hidden></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

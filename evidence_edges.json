@@ -1,0 +1,44 @@
+[
+  {
+    "source": "META-2020-QIU",
+    "target": "GUIDE-2023-CMA-MPP",
+    "relation": "supports",
+    "description": "系统综述结论支持指南中关于 SMPP 联合使用糖皮质激素的方向。"
+  },
+  {
+    "source": "META-2020-SUN",
+    "target": "GUIDE-2023-CMA-MPP",
+    "relation": "supplements",
+    "description": "Meta 分析补充了指南中未形成共识的剂量问题。"
+  },
+  {
+    "source": "RCT-2025-XU-MCMP",
+    "target": "GUIDE-2023-CMA-MPP",
+    "relation": "updates",
+    "description": "2025 年多中心 RCT 晚于 2023 年指南制定时间，可用于更新剂量层面的判断。"
+  },
+  {
+    "source": "RCT-2025-XU-MCMP",
+    "target": "META-2020-SUN",
+    "relation": "confirms",
+    "description": "新 RCT 与既往高低剂量 Meta 分析方向一致：高剂量未显示明确优势且安全性更差。"
+  },
+  {
+    "source": "OBS-2024-TONGJI",
+    "target": "META-2020-QIU",
+    "relation": "supplements",
+    "description": "观察性队列为联合治疗的短期临床效果提供现实世界补充。"
+  },
+  {
+    "source": "REVIEW-2025-NARRATIVE",
+    "target": "RCT-2025-XU-MCMP",
+    "relation": "supplements",
+    "description": "叙述性综述补充安全性、治疗时机和长期随访不足等问题。"
+  },
+  {
+    "source": "CASE-2025-PE",
+    "target": "GUIDE-2023-CMA-MPP",
+    "relation": "cautions",
+    "description": "病例报告提示严重并发症场景下不能机械套用常规推荐。"
+  }
+]
