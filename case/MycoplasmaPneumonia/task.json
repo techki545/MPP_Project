@@ -1,0 +1,13 @@
+{
+  "input": "A pediatric case JSON containing demographics, symptoms, vitals, laboratory tests, pathogen tests, imaging report or image-derived findings, medication history, and follow-up information.",
+  "disease": "Evidence-based clinical decision support for pediatric Mycoplasma pneumoniae pneumonia",
+  "goal": [
+    "suspected case identification",
+    "severity stratification",
+    "severe or refractory risk assessment",
+    "evidence retrieval and traceable recommendation generation",
+    "follow-up warning support"
+  ],
+  "safety_scope": "Research prototype for clinical decision support. It does not replace physician diagnosis or treatment decisions."
+}
+

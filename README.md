@@ -51,6 +51,8 @@ MPP_Project/
 ├─ evidence_edges.json        # 证据关系
 ├─ MycoplasmaPneumonia/
 │  └─ llm_client.py           # 模型 JSON 输出解析
+├─ disease/                    # 疾病级任务规划与本地 RAG
+├─ case/                       # 病例级执行器、工具和示例病例
 └─ web/
    ├─ index.html
    ├─ styles.css
@@ -64,6 +66,22 @@ python demo_graph_rag.py
 ```
 
 默认使用本地规则生成报告，不需要 API Key。
+
+## 疾病级与病例级流程
+
+生成疾病级任务计划：
+
+```powershell
+python -m disease.Task_level
+```
+
+运行内置示例病例：
+
+```powershell
+python -m case.Case_level
+```
+
+病例运行结果写入 `case/MycoplasmaPneumonia/record/`，该目录已被 Git 忽略。
 
 ## API
 

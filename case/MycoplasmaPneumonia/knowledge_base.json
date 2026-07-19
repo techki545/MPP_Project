@@ -1,0 +1,51 @@
+[
+  {
+    "id": "MPP-DX-001",
+    "topic": "diagnosis",
+    "level": "guideline_consensus",
+    "tags": ["diagnosis", "fever", "cough", "pcr", "igm", "radiology"],
+    "statement": "Pediatric Mycoplasma pneumoniae pneumonia should be considered when a child has persistent fever and cough with compatible radiologic pneumonia, especially when pathogen testing such as PCR or serology supports Mycoplasma pneumoniae infection.",
+    "clinical_use": "Use as diagnostic evidence, not as a standalone diagnosis."
+  },
+  {
+    "id": "MPP-SEV-001",
+    "topic": "severity",
+    "level": "guideline_consensus",
+    "tags": ["severity", "hypoxemia", "respiratory_distress", "pleural_effusion", "multilobar", "atelectasis"],
+    "statement": "Hypoxemia, respiratory distress, multilobar lung involvement, pleural effusion, atelectasis, rapid radiologic progression, or extrapulmonary complications suggest more severe disease and need closer monitoring.",
+    "clinical_use": "Use to trigger severity stratification and escalation review."
+  },
+  {
+    "id": "MPP-RISK-001",
+    "topic": "refractory_risk",
+    "level": "clinical_literature",
+    "tags": ["refractory", "persistent_fever", "macrolide", "poor_response", "crp", "ldh"],
+    "statement": "Persistent fever, poor clinical response after an adequate macrolide trial, elevated inflammatory markers, increased LDH, and significant radiologic involvement are commonly used warning signals for refractory or severe Mycoplasma pneumoniae pneumonia.",
+    "clinical_use": "Use to identify children who need specialist review and treatment reassessment."
+  },
+  {
+    "id": "MPP-TX-001",
+    "topic": "treatment",
+    "level": "guideline_consensus",
+    "tags": ["treatment", "macrolide", "resistance", "age", "specialist_review"],
+    "statement": "Macrolides are commonly used first-line therapy for pediatric Mycoplasma pneumoniae pneumonia. When resistance, intolerance, or poor response is suspected, alternative therapy should be reviewed by clinicians with attention to age limits, contraindications, local guidance, and antimicrobial stewardship.",
+    "clinical_use": "Use to generate clinician-review treatment suggestions, not automatic prescriptions."
+  },
+  {
+    "id": "MPP-IMG-001",
+    "topic": "imaging",
+    "level": "clinical_literature",
+    "tags": ["imaging", "consolidation", "pleural_effusion", "atelectasis", "necrotizing_pneumonia"],
+    "statement": "Imaging findings such as lobar consolidation, multilobar involvement, atelectasis, pleural effusion, or necrotizing change provide important evidence for disease burden and complication assessment.",
+    "clinical_use": "Use as one imaging evidence source within multimodal reasoning."
+  },
+  {
+    "id": "MPP-FU-001",
+    "topic": "follow_up",
+    "level": "guideline_consensus",
+    "tags": ["follow_up", "warning", "persistent_fever", "dyspnea", "oxygen", "recheck"],
+    "statement": "Follow-up should pay attention to persistent fever, worsening cough or dyspnea, decreasing oxygen saturation, poor oral intake, extrapulmonary symptoms, and delayed radiologic recovery.",
+    "clinical_use": "Use to produce follow-up warning prompts."
+  }
+]
+

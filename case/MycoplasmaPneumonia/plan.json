@@ -1,0 +1,118 @@
+[
+  {
+    "id": 1,
+    "layer": "data",
+    "tool": [
+      1
+    ],
+    "action_type": "quantitative",
+    "action": "Normalize multimodal pediatric MPP case data",
+    "input_type": [
+      0
+    ],
+    "output_type": "standardized data",
+    "output_path": "diagnosis.json",
+    "proposal_task": "multimodal data cleaning, de-identification, coding, and standardization"
+  },
+  {
+    "id": 2,
+    "layer": "model",
+    "tool": [
+      2
+    ],
+    "action_type": "qualitative",
+    "action": "Assess suspected Mycoplasma pneumoniae pneumonia",
+    "input_type": [
+      1
+    ],
+    "output_type": "diagnostic indicator",
+    "output_path": "diagnosis.json",
+    "proposal_task": "suspected case identification"
+  },
+  {
+    "id": 3,
+    "layer": "model",
+    "tool": [
+      3
+    ],
+    "action_type": "quantitative",
+    "action": "Stratify disease severity",
+    "input_type": [
+      1
+    ],
+    "output_type": "risk indicator",
+    "output_path": "diagnosis.json",
+    "proposal_task": "severity stratification"
+  },
+  {
+    "id": 4,
+    "layer": "model",
+    "tool": [
+      4
+    ],
+    "action_type": "quantitative",
+    "action": "Assess refractory or severe progression risk",
+    "input_type": [
+      1
+    ],
+    "output_type": "risk indicator",
+    "output_path": "diagnosis.json",
+    "proposal_task": "severe and refractory risk assessment"
+  },
+  {
+    "id": 5,
+    "layer": "knowledge",
+    "tool": [
+      5
+    ],
+    "action_type": "qualitative",
+    "action": "Retrieve traceable evidence from the MPP knowledge base",
+    "input_type": [
+      2,
+      3,
+      4
+    ],
+    "output_type": "evidence set",
+    "output_path": "diagnosis.json",
+    "proposal_task": "RAG evidence retrieval and traceable knowledge base use"
+  },
+  {
+    "id": 6,
+    "layer": "application",
+    "tool": [
+      6
+    ],
+    "action_type": "qualitative",
+    "action": "Generate clinician-review management recommendation",
+    "input_type": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "output_type": "management recommendation",
+    "output_path": "diagnosis.json",
+    "proposal_task": "treatment reference, efficacy review, and follow-up warning"
+  },
+  {
+    "id": 7,
+    "layer": "application",
+    "tool": [
+      7
+    ],
+    "action_type": "qualitative",
+    "action": "Build final evidence-based recommendation report",
+    "input_type": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "output_type": "final report",
+    "output_path": "final_recommendation.json",
+    "proposal_task": "interpretable and evidence-traceable output"
+  }
+]

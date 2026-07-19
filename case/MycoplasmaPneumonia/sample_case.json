@@ -1,0 +1,52 @@
+{
+  "case_id": "demo_mpp_001",
+  "age_years": 7,
+  "sex": "female",
+  "symptoms": {
+    "fever_days": 7,
+    "max_temperature_c": 39.2,
+    "cough": true,
+    "wheezing": false,
+    "dyspnea": true,
+    "chest_pain": false
+  },
+  "vitals": {
+    "spo2": 93,
+    "respiratory_distress": true,
+    "heart_rate": 118,
+    "respiratory_rate": 34
+  },
+  "labs": {
+    "wbc_10e9_l": 4.8,
+    "neutrophil_ratio": 0.72,
+    "crp_mg_l": 58,
+    "pct_ng_ml": 0.18,
+    "ldh_u_l": 420
+  },
+  "pathogen": {
+    "mycoplasma_pcr": "positive",
+    "mycoplasma_igm": "positive",
+    "macrolide_resistance": "unknown"
+  },
+  "imaging": {
+    "image_path": "",
+    "radiology_report": "Right lower lobe consolidation with small pleural effusion. No necrotizing pneumonia is reported.",
+    "image_features": {
+      "consolidation": true,
+      "pleural_effusion": true,
+      "multilobar": false,
+      "atelectasis": false,
+      "necrotizing_pneumonia": false
+    }
+  },
+  "treatment_history": {
+    "macrolide_days": 3,
+    "response": "poor",
+    "persistent_fever_after_treatment": true
+  },
+  "follow_up": {
+    "poor_oral_intake": false,
+    "extrapulmonary_symptoms": false
+  }
+}
+

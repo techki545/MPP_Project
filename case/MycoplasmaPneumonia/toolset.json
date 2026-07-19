@@ -1,0 +1,59 @@
+[
+  {
+    "id": 1,
+    "type": "data normalization module",
+    "function": "Normalize multimodal pediatric case data",
+    "input": "Raw pediatric case JSON or dictionary",
+    "output": "Standardized case representation with detected modalities and imaging features",
+    "command": "normalize_patient_case()"
+  },
+  {
+    "id": 2,
+    "type": "clinical reasoning module",
+    "function": "Assess suspected Mycoplasma pneumoniae pneumonia",
+    "input": "Standardized case representation",
+    "output": "Suspicion level, score, supporting signals, and evidence hooks",
+    "command": "assess_suspected_mpp()"
+  },
+  {
+    "id": 3,
+    "type": "risk stratification module",
+    "function": "Stratify pneumonia severity",
+    "input": "Standardized case representation",
+    "output": "Mild, moderate, or severe category with rationale",
+    "command": "stratify_severity()"
+  },
+  {
+    "id": 4,
+    "type": "risk stratification module",
+    "function": "Assess refractory or severe progression risk",
+    "input": "Standardized case representation and treatment response",
+    "output": "Refractory risk category with rationale",
+    "command": "assess_refractory_risk()"
+  },
+  {
+    "id": 5,
+    "type": "RAG evidence retriever",
+    "function": "Retrieve traceable evidence from the pediatric MPP knowledge base",
+    "input": "Case-level indicators and risk outputs",
+    "output": "Ranked evidence snippets with evidence IDs and tags",
+    "command": "retrieve_evidence()"
+  },
+  {
+    "id": 6,
+    "type": "evidence recommendation module",
+    "function": "Generate clinician-review management recommendation",
+    "input": "Standardized case, diagnosis, severity, refractory risk, and evidence set",
+    "output": "Evidence-linked recommendation items and follow-up warnings",
+    "command": "recommend_management()"
+  },
+  {
+    "id": 7,
+    "type": "report generator",
+    "function": "Build final evidence-based report",
+    "input": "All previous outputs",
+    "output": "Final traceable recommendation report",
+    "command": "build_final_report()"
+  }
+]
+
