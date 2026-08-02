@@ -30,7 +30,7 @@ python -m pip install -r requirements.txt
 python -c "from rapidocr import RapidOCR; RapidOCR(); print('RapidOCR ready')"
 ```
 
-复制 `.env.example` 中的变量到当前 PowerShell 会话或系统环境。密钥只放在服务端环境变量中，不写入网页、Git、SQLite、日志或验证报告：
+复制 `.env.example` 中的变量到当前 PowerShell 会话或系统环境。环境变量是持久的服务端配置选项；网页也可接受仅保留在当前页面内存中的临时 API Key。两种方式都不会将密钥写入 Git、SQLite、日志或报告：
 
 ```powershell
 $env:MPP_KB_SOURCE='C:\Users\LTC\Desktop\MPP'
@@ -96,11 +96,11 @@ python web_server.py --host 127.0.0.1 --port 8765
 
 浏览器打开 [http://127.0.0.1:8765/](http://127.0.0.1:8765/)。端口占用时可改为 `8766`。网页中的知识库构建按钮调用后端任务，可暂停、继续或按阶段重试；任务轮询不会阻止已经建好的索引继续回答问题。
 
-如果本地索引尚未构建，页面会明确标记并使用仓库内置的“示例证据”，不会把示例结果伪装成真实语料检索。
+如果本地索引尚未构建，页面会明确标记并使用仓库内置的“示例证据”，不会把示例结果伪装成真实语料检索。此模式会校验 `model_config`，但不会调用任何模型，而是返回确定性的示例输出。
 
 ### 网页“模型服务”配置
 
-网页“模型服务”允许输入 OpenAI 兼容 API 地址、API Key 和模型名。三项必须成组填写；三项全部留空时使用服务端环境变量 `MPP_API_BASE`、`MPP_API_KEY` 和 `MPP_CHAT_MODEL`。这些值仅随当前一次证据查询发送，不会写入文件、数据库、浏览器存储或状态 API，刷新页面或离开页面后即清空。
+网页“模型服务”允许输入 OpenAI 兼容 API 地址、API Key 和模型名。三项必须成组填写；三项全部留空时使用服务端环境变量 `MPP_API_BASE`、`MPP_API_KEY` 和 `MPP_CHAT_MODEL`。页面填写值保留在当前页面内存中，并供刷新或离开前从该页面提交的每次查询复用；每次提交都会随该请求发送。它们不会写入文件、数据库、浏览器存储或状态 API，并在刷新或触发 `pagehide`（离开或跳转）时清空。
 
 浏览器请求配置只控制证据精炼、声明抽取和报告生成所用的聊天模型，不会更改 `MPP_EMBEDDING_MODEL`、重建向量或触发付费嵌入。公网 API 地址必须使用 HTTPS；`localhost`、`127.0.0.1` 和 `::1` 可使用 HTTP。API Key 默认掩码显示，可切换可见性。服务商返回 401、403 或模型权限错误时，请改用有效令牌和已获授权的模型，切勿把密钥粘贴到源代码中。
 
