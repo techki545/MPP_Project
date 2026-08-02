@@ -103,7 +103,7 @@ class GraphRAGWebService:
         ):
             raise APIError(
                 "client_model_config_forbidden",
-                "模型配置只能由服务器环境变量提供。",
+                "请使用 model_config 提供单次查询的模型配置。",
             )
         model_config = (
             _parse_model_config(payload["model_config"])
@@ -117,6 +117,10 @@ class GraphRAGWebService:
 
         status = self.knowledge_base_status()
         if self.knowledge_service is not None and status.get("status") == "ready":
+            if model_config is None:
+                return self._call_knowledge(
+                    self.knowledge_service.query, question, filters
+                )
             return self._call_knowledge(
                 self.knowledge_service.query,
                 question,
@@ -356,6 +360,8 @@ def _parse_model_config(value: object) -> dict[str, str]:
 
 
 def _normalize_model_base_url(base_url: str) -> str:
+    if "?" in base_url or "#" in base_url:
+        raise _invalid_model_config()
     try:
         parsed = urlsplit(base_url)
         parsed.port

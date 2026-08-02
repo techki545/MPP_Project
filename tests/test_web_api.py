@@ -37,6 +37,16 @@ class FakeKnowledgeService:
         return {"document_id": document_id, "title": "Trial"}
 
 
+class LegacyKnowledgeService(FakeKnowledgeService):
+    def __init__(self):
+        super().__init__()
+        self.query_called = False
+
+    def query(self, question, filters):
+        self.query_called = True
+        return super().query(question, filters)
+
+
 def make_web_service(knowledge_service=None) -> GraphRAGWebService:
     root = Path(__file__).resolve().parents[1]
     return GraphRAGWebService(
@@ -53,7 +63,7 @@ def test_health_reports_demo_and_knowledge_base_components() -> None:
 
 
 def test_query_without_model_config_uses_server_configuration_and_builds_filters() -> None:
-    knowledge_service = FakeKnowledgeService()
+    knowledge_service = LegacyKnowledgeService()
     service = make_web_service(knowledge_service)
 
     result = service.query(
@@ -71,6 +81,7 @@ def test_query_without_model_config_uses_server_configuration_and_builds_filters
     assert filters.evidence_types == frozenset({"guideline"})
     assert filters.year_from == 2020
     assert filters.fulltext_only is True
+    assert knowledge_service.query_called is True
     assert knowledge_service.received_model_config is None
 
 
@@ -120,6 +131,9 @@ def _valid_model_config(**overrides):
         _valid_model_config(base_url=123),
         _valid_model_config(api_key=123),
         _valid_model_config(model_name=123),
+        _valid_model_config(base_url=" \t "),
+        _valid_model_config(api_key=" \t "),
+        _valid_model_config(model_name=" \t "),
         _valid_model_config(base_url="x" * 2049),
         _valid_model_config(api_key="x" * 4097),
         _valid_model_config(model_name="x" * 257),
@@ -127,6 +141,9 @@ def _valid_model_config(**overrides):
         _valid_model_config(base_url="https://user:password@provider.example/v1"),
         _valid_model_config(base_url="https://provider.example/v1?mode=chat"),
         _valid_model_config(base_url="https://provider.example/v1#chat"),
+        _valid_model_config(base_url="https://provider.example/v1?"),
+        _valid_model_config(base_url="https://provider.example/v1#"),
+        _valid_model_config(base_url="https://provider.example/v1?#"),
         _valid_model_config(base_url="https:///v1"),
         _valid_model_config(base_url="ftp://provider.example/v1"),
     ],
@@ -141,6 +158,9 @@ def _valid_model_config(**overrides):
         "non-string-base-url",
         "non-string-api-key",
         "non-string-model-name",
+        "whitespace-base-url",
+        "whitespace-api-key",
+        "whitespace-model-name",
         "overlong-base-url",
         "overlong-api-key",
         "overlong-model-name",
@@ -148,6 +168,9 @@ def _valid_model_config(**overrides):
         "url-credentials",
         "query-string",
         "fragment",
+        "bare-query-delimiter",
+        "bare-fragment-delimiter",
+        "bare-query-fragment-delimiters",
         "missing-hostname",
         "unsupported-scheme",
     ],
@@ -197,6 +220,22 @@ def test_query_accepts_public_https_model_config() -> None:
     )
 
 
+def test_query_accepts_model_config_values_at_exact_maximum_lengths() -> None:
+    knowledge_service = FakeKnowledgeService()
+    base_url_prefix = "https://provider.example/"
+    model_config = {
+        "base_url": base_url_prefix + "x" * (2048 - len(base_url_prefix)),
+        "api_key": "k" * 4096,
+        "model_name": "m" * 256,
+    }
+
+    make_web_service(knowledge_service).query(
+        {"question": "clinical question", "model_config": model_config}
+    )
+
+    assert knowledge_service.received_model_config == model_config
+
+
 @pytest.mark.parametrize(
     ("base_url", "expected"),
     [
@@ -226,6 +265,7 @@ def test_query_still_rejects_legacy_top_level_model_configuration(field) -> None
         )
 
     assert captured.value.code == "client_model_config_forbidden"
+    assert captured.value.message == "请使用 model_config 提供单次查询的模型配置。"
 
 
 def test_analyze_uses_model_config_field_instead_of_legacy_model_field() -> None:
@@ -247,6 +287,20 @@ def test_not_built_uses_explicit_demo_fallback() -> None:
     assert all(source["data_source"] == "demo" for source in result["sources"])
 
 
+def test_demo_fallback_validates_and_discards_model_config() -> None:
+    unique_api_key = "demo-only-unique-api-key"
+
+    result = make_web_service().query(
+        {
+            "question": "steroid",
+            "model_config": _valid_model_config(api_key=unique_api_key),
+        }
+    )
+
+    assert result["data_source"] == "demo"
+    assert unique_api_key not in json.dumps(result, ensure_ascii=False)
+
+
 class FakeJobManager:
     def __init__(self):
         self.calls = []
@@ -261,7 +315,10 @@ class FakeJobManager:
         return Record()
 
 
-def test_web_build_still_rejects_browser_model_config() -> None:
+@pytest.mark.parametrize(
+    "field", ["model", "api_key", "base_url", "model_name", "model_config"]
+)
+def test_web_build_still_rejects_browser_model_configuration(field) -> None:
     service = GraphRAGWebService(
         load_default_graph(str(Path(__file__).resolve().parents[1])),
         knowledge_service=FakeKnowledgeService(),
@@ -269,7 +326,8 @@ def test_web_build_still_rejects_browser_model_config() -> None:
     )
 
     with pytest.raises(APIError) as captured:
-        service.start_build({"model_config": _valid_model_config()})
+        value = _valid_model_config() if field == "model_config" else "legacy-value"
+        service.start_build({field: value})
 
     assert captured.value.code == "client_model_config_forbidden"
 
