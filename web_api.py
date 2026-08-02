@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ipaddress
+import unicodedata
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -368,7 +369,7 @@ def _normalize_model_base_url(base_url: str) -> str:
         or "#" in base_url
         or "\\" in base_url
         or any(
-            character.isspace() or ord(character) < 32 or ord(character) == 127
+            character.isspace() or unicodedata.category(character) == "Cc"
             for character in base_url
         )
     ):
