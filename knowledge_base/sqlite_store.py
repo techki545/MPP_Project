@@ -122,6 +122,7 @@ class SQLiteStore:
                     record_id TEXT NOT NULL,
                     kind TEXT NOT NULL,
                     model_name TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
                     PRIMARY KEY (record_id, kind, model_name)
                 );
                 CREATE TABLE IF NOT EXISTS build_jobs (
@@ -323,65 +324,95 @@ class SQLiteStore:
         with self._connection() as connection:
             metadata_rows = connection.execute(
                 """
-                SELECT d.document_id, d.title, d.abstract
+                SELECT d.document_id, d.title, d.abstract,
+                       indexed.content_hash AS indexed_content_hash
                 FROM documents AS d
+                LEFT JOIN embedding_index_state AS indexed
+                  ON indexed.record_id = d.document_id
+                 AND indexed.kind = ?
+                 AND indexed.model_name = ?
                 WHERE (d.title <> '' OR d.abstract <> '')
-                  AND NOT EXISTS (
-                      SELECT 1 FROM embedding_index_state AS indexed
-                      WHERE indexed.record_id = d.document_id
-                        AND indexed.kind = ?
-                        AND indexed.model_name = ?
-                  )
                 ORDER BY d.document_id
                 """,
                 ("metadata", model_name),
             ).fetchall()
             chunk_rows = connection.execute(
                 """
-                SELECT c.chunk_id, c.document_id, c.text, c.content_hash
+                SELECT c.chunk_id, c.document_id, c.text, c.content_hash,
+                       indexed.content_hash AS indexed_content_hash
                 FROM chunks AS c
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM embedding_index_state AS indexed
-                    WHERE indexed.record_id = c.chunk_id
-                      AND indexed.kind = ?
-                      AND indexed.model_name = ?
-                )
+                LEFT JOIN embedding_index_state AS indexed
+                  ON indexed.record_id = c.chunk_id
+                 AND indexed.kind = ?
+                 AND indexed.model_name = ?
                 ORDER BY c.chunk_id
                 """,
                 ("chunk", model_name),
             ).fetchall()
 
-        items = [
-            EmbeddingItem(
-                record_id=row["document_id"],
-                document_id=row["document_id"],
-                kind="metadata",
-                text=self._metadata_text(row["title"], row["abstract"]),
-                content_hash=self._metadata_content_hash(row["title"], row["abstract"]),
+        items: list[EmbeddingItem] = []
+        for row in metadata_rows:
+            content_hash = self._metadata_content_hash(row["title"], row["abstract"])
+            if row["indexed_content_hash"] == content_hash:
+                continue
+            items.append(
+                EmbeddingItem(
+                    record_id=row["document_id"],
+                    document_id=row["document_id"],
+                    kind="metadata",
+                    text=self._metadata_text(row["title"], row["abstract"]),
+                    content_hash=content_hash,
+                )
             )
-            for row in metadata_rows
-        ]
-        items.extend(
-            EmbeddingItem(
-                record_id=row["chunk_id"],
-                document_id=row["document_id"],
-                kind="chunk",
-                text=row["text"],
-                content_hash=row["content_hash"],
+        for row in chunk_rows:
+            if row["indexed_content_hash"] == row["content_hash"]:
+                continue
+            items.append(
+                EmbeddingItem(
+                    record_id=row["chunk_id"],
+                    document_id=row["document_id"],
+                    kind="chunk",
+                    text=row["text"],
+                    content_hash=row["content_hash"],
+                )
             )
-            for row in chunk_rows
-        )
         return items if limit is None else items[:limit]
 
     def mark_embedding_indexed(self, record_id: str, kind: str, model_name: str) -> None:
         with self._connection() as connection:
+            if kind == "metadata":
+                row = connection.execute(
+                    "SELECT title, abstract FROM documents WHERE document_id = ?",
+                    (record_id,),
+                ).fetchone()
+                if row is None:
+                    raise KnowledgeBaseError(
+                        "embedding_record_not_found", "Embedding record was not found"
+                    )
+                content_hash = self._metadata_content_hash(
+                    row["title"], row["abstract"]
+                )
+            elif kind == "chunk":
+                row = connection.execute(
+                    "SELECT content_hash FROM chunks WHERE chunk_id = ?", (record_id,)
+                ).fetchone()
+                if row is None:
+                    raise KnowledgeBaseError(
+                        "embedding_record_not_found", "Embedding record was not found"
+                    )
+                content_hash = row["content_hash"]
+            else:
+                raise KnowledgeBaseError(
+                    "invalid_embedding_kind", "Embedding kind must be metadata or chunk"
+                )
             connection.execute(
                 """
-                INSERT INTO embedding_index_state(record_id, kind, model_name)
-                VALUES (?, ?, ?)
-                ON CONFLICT(record_id, kind, model_name) DO NOTHING
+                INSERT INTO embedding_index_state(record_id, kind, model_name, content_hash)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(record_id, kind, model_name) DO UPDATE SET
+                    content_hash = excluded.content_hash
                 """,
-                (record_id, kind, model_name),
+                (record_id, kind, model_name, content_hash),
             )
 
     def set_job_state(self, job_id: str, state: str, progress: dict[str, Any]) -> None:

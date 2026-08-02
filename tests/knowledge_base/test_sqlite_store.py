@@ -1,4 +1,4 @@
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
@@ -138,6 +138,51 @@ def test_pending_embedding_items_are_scoped_to_model(
         ("doc-1", "metadata"),
         ("chunk-1", "chunk"),
     }
+
+
+def test_changed_metadata_becomes_pending_after_being_indexed(
+    store: SQLiteStore,
+    document: DocumentRecord,
+    file_record: FileRecord,
+    chunk: ChunkRecord,
+):
+    insert_document_graph(store, document, file_record, chunk)
+    original_item = next(
+        item
+        for item in store.list_pending_embedding_items("model-a")
+        if item.record_id == "doc-1"
+    )
+    store.mark_embedding_indexed("doc-1", "metadata", "model-a")
+
+    updated_document = replace(document, abstract="更新后的甲泼尼龙剂量比较。")
+    store.upsert_document(updated_document)
+
+    pending = store.list_pending_embedding_items("model-a")
+    metadata_item = next(item for item in pending if item.record_id == "doc-1")
+    assert metadata_item.kind == "metadata"
+    assert metadata_item.content_hash != original_item.content_hash
+
+
+def test_changed_chunk_becomes_pending_after_being_indexed(
+    store: SQLiteStore,
+    document: DocumentRecord,
+    file_record: FileRecord,
+    chunk: ChunkRecord,
+):
+    insert_document_graph(store, document, file_record, chunk)
+    store.mark_embedding_indexed("chunk-1", "chunk", "model-a")
+
+    updated_chunk = replace(
+        chunk,
+        text="更新后的低剂量组与高剂量组疗效比较。",
+        content_hash="updated-chunk-content-hash",
+    )
+    store.upsert_chunk(updated_chunk)
+
+    pending = store.list_pending_embedding_items("model-a")
+    chunk_item = next(item for item in pending if item.record_id == "chunk-1")
+    assert chunk_item.kind == "chunk"
+    assert chunk_item.content_hash == "updated-chunk-content-hash"
 
 
 def test_job_progress_and_error_records_round_trip(store: SQLiteStore):
