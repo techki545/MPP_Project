@@ -42,6 +42,51 @@ def test_chunk_uses_ocr_and_conservative_quality_when_any_page_requires_it() -> 
     assert chunks[0].quality == "ocr"
 
 
+@pytest.mark.parametrize(
+    ("page_quality", "used_ocr", "expected_quality"),
+    [
+        ("extracted", False, "extracted"),
+        ("ocr", True, "ocr"),
+        ("ocr_reduced", True, "ocr_reduced"),
+        ("low_quality", False, "low_quality"),
+        ("low_quality_reduced", False, "low_quality_reduced"),
+        ("ocr_error", False, "degraded"),
+        ("ocr_too_large", False, "degraded"),
+        ("page_error", False, "degraded"),
+    ],
+)
+def test_chunker_preserves_conservative_single_page_quality(
+    page_quality: str, used_ocr: bool, expected_quality: str
+) -> None:
+    pages = (ParsedPage(1, "Retained page text for quality propagation.", used_ocr, page_quality),)
+
+    chunks = chunk_pages("doc", "file", pages, target_tokens=100, overlap_tokens=10)
+
+    assert chunks[0].quality == expected_quality
+
+
+@pytest.mark.parametrize(
+    ("qualities", "ocr_flags", "expected_quality"),
+    [
+        (("ocr", "ocr_reduced"), (True, True), "ocr_reduced"),
+        (("ocr_reduced", "low_quality_reduced"), (True, False), "low_quality_reduced"),
+        (("ocr", "ocr_too_large"), (True, False), "degraded"),
+        (("extracted", "page_error"), (False, False), "degraded"),
+    ],
+)
+def test_chunker_uses_deterministic_worst_quality_for_mixed_pages(
+    qualities: tuple[str, ...], ocr_flags: tuple[bool, ...], expected_quality: str
+) -> None:
+    pages = tuple(
+        ParsedPage(index + 1, f"Retained page {index} text for mixed quality.", ocr_flags[index], quality)
+        for index, quality in enumerate(qualities)
+    )
+
+    chunks = chunk_pages("doc", "file", pages, target_tokens=100, overlap_tokens=10)
+
+    assert chunks[0].quality == expected_quality
+
+
 def test_chunker_detects_english_sections_case_insensitively() -> None:
     pages = (ParsedPage(1, "ABSTRACT\nBackground text.\n\nDISCUSSION\nInterpretation text.", False, "extracted"),)
 

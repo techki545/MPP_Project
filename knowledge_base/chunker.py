@@ -17,6 +17,17 @@ _HEADING_RE = re.compile(
     r"^(摘要|abstract|方法|methods|结果|results|讨论|discussion|结论|conclusion|参考文献|references)\s*[:：]?\s*$",
     re.IGNORECASE,
 )
+_DEGRADED_QUALITIES = frozenset({"ocr_too_large", "ocr_error", "page_error"})
+_QUALITY_PRECEDENCE = {
+    "extracted": 0,
+    "ocr": 1,
+    "ocr_reduced": 2,
+    "low_quality": 3,
+    "low_quality_reduced": 4,
+    "ocr_too_large": 5,
+    "ocr_error": 5,
+    "page_error": 5,
+}
 
 
 @dataclass(frozen=True)
@@ -201,11 +212,13 @@ def _join_fragment_texts(fragments: Sequence[_Fragment]) -> str:
 
 
 def _conservative_quality(fragments: Sequence[_Fragment], is_ocr: bool) -> str:
-    if is_ocr:
-        return "ocr"
     qualities = {fragment.quality for fragment in fragments}
-    if "low_quality" in qualities:
-        return "low_quality"
-    if "ocr_error" in qualities or "page_error" in qualities:
+    worst_quality = max(
+        qualities,
+        key=lambda quality: _QUALITY_PRECEDENCE.get(quality, len(_QUALITY_PRECEDENCE)),
+    )
+    if worst_quality in _DEGRADED_QUALITIES or worst_quality not in _QUALITY_PRECEDENCE:
         return "degraded"
-    return "extracted"
+    if worst_quality == "extracted" and is_ocr:
+        return "ocr"
+    return worst_quality
