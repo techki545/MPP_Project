@@ -59,7 +59,13 @@ class KnowledgeBaseService:
         self.store = store
         self.pipeline = pipeline
 
-    def query(self, question: str, filters: SearchFilters) -> dict[str, Any]:
+    def query(
+        self,
+        question: str,
+        filters: SearchFilters,
+        *,
+        model_config: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
         clean_question = " ".join(str(question or "").split())
         if not clean_question:
             raise KnowledgeBaseError("empty_question", "Clinical question is required")
@@ -76,7 +82,17 @@ class KnowledgeBaseService:
         ):
             raise KnowledgeBaseError("invalid_year_range", "Year range is invalid")
 
-        raw_result = self.pipeline.run(clean_question, filters)
+        if model_config is None:
+            raw_result = self.pipeline.run(clean_question, filters)
+        else:
+            chat_client = ChatClient(
+                model_config["base_url"],
+                model_config["api_key"],
+                model_config["model_name"],
+            )
+            raw_result = self.pipeline.run(
+                clean_question, filters, chat_client=chat_client
+            )
         if not isinstance(raw_result, Mapping):
             raise KnowledgeBaseError(
                 "query_pipeline_invalid", "Query pipeline response is invalid"
@@ -265,6 +281,16 @@ class SQLiteDocumentStore:
         )
 
 
+def _chat_components(
+    chat_client: Any,
+) -> tuple[ChatEvidenceRefiner, GroundedClaimExtractor, GroundedReporter]:
+    return (
+        ChatEvidenceRefiner(chat_client),
+        GroundedClaimExtractor(chat_client),
+        GroundedReporter(chat_client),
+    )
+
+
 class ProductionQueryPipeline:
     def __init__(
         self,
@@ -283,16 +309,33 @@ class ProductionQueryPipeline:
         self.graph_builder = graph_builder
         self.reporter = reporter
 
-    def run(self, question: str, filters: SearchFilters) -> dict[str, Any]:
+    def run(
+        self,
+        question: str,
+        filters: SearchFilters,
+        *,
+        chat_client: Any | None = None,
+    ) -> dict[str, Any]:
+        evidence_refiner = self.evidence_refiner
+        claim_extractor = self.claim_extractor
+        reporter = self.reporter
+        if chat_client is not None:
+            (
+                evidence_refiner,
+                claim_extractor,
+                reporter,
+            ) = _chat_components(chat_client)
         retrieval = self.retriever.search(question, filters)
         sources = tuple(
-            self._evidence_source(index, item)
+            self._evidence_source(
+                index, item, evidence_refiner=evidence_refiner
+            )
             for index, item in enumerate(retrieval.documents, start=1)
         )
         empty_bundle = EvidenceBundle(sources=sources, graph={"nodes": [], "edges": []})
         claim_error: str | None = None
         try:
-            validated = self.claim_extractor.extract(question, empty_bundle)
+            validated = claim_extractor.extract(question, empty_bundle)
         except KnowledgeBaseError as error:
             claim_error = error.code
             validated = ValidatedClaims((), ())
@@ -301,7 +344,7 @@ class ProductionQueryPipeline:
             validated = ValidatedClaims((), ())
         graph = self.graph_builder.build(question, validated.claims).as_dict()
         bundle = EvidenceBundle(sources=sources, graph=graph)
-        report = self.reporter.generate_with_fallback(question, bundle)
+        report = reporter.generate_with_fallback(question, bundle)
         relation_counts = Counter(edge["relation"] for edge in graph["edges"])
         model_error = report.model_error or claim_error
         return {
@@ -330,7 +373,13 @@ class ProductionQueryPipeline:
             "data_source": "knowledge_base",
         }
 
-    def _evidence_source(self, number: int, item: Any) -> EvidenceSource:
+    def _evidence_source(
+        self,
+        number: int,
+        item: Any,
+        *,
+        evidence_refiner: ChatEvidenceRefiner,
+    ) -> EvidenceSource:
         detail = self.document_store.document_detail(item.document_id) or {}
         title = str(detail.get("title") or item.payload.get("title") or item.document_id)
         abstract = str(detail.get("abstract") or item.payload.get("abstract") or "")
@@ -345,7 +394,7 @@ class ProductionQueryPipeline:
         )
         if assessment.evidence_type == "unknown" and not detail:
             assessment = classify_evidence(title, abstract)
-        refined = self.evidence_refiner.refine(title, abstract, assessment)
+        refined = evidence_refiner.refine(title, abstract, assessment)
         fulltext_hits = [
             hit for hit in item.supporting_hits if "fulltext" in hit.source
         ]

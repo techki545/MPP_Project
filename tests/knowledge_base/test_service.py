@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import knowledge_base.service as service_module
 from knowledge_base.config import Settings
 from knowledge_base.errors import KnowledgeBaseError
 from knowledge_base.graph_builder import LocalGraphBuilder
@@ -65,7 +66,9 @@ class FakeDocumentStore:
         return {"metadata_records": 1, "pdf_files": 1, "matched_pdf_files": 1}
 
 
-def make_service(tmp_path: Path, *, pdf_outside: bool = False) -> KnowledgeBaseService:
+def make_service(
+    tmp_path: Path, *, pdf_outside: bool = False, pipeline=None
+) -> KnowledgeBaseService:
     source = tmp_path / "corpus"
     source.mkdir()
     pdf_path = (tmp_path if pdf_outside else source) / "trial.pdf"
@@ -80,7 +83,115 @@ def make_service(tmp_path: Path, *, pdf_outside: bool = False) -> KnowledgeBaseS
         project_root=tmp_path,
     )
     return KnowledgeBaseService(
-        settings, FakeDocumentStore(pdf_path), FakeQueryPipeline()
+        settings,
+        FakeDocumentStore(pdf_path),
+        pipeline if pipeline is not None else FakeQueryPipeline(),
+    )
+
+
+class SequencedChat:
+    def __init__(self, model: str, *responses: dict) -> None:
+        self.model = model
+        self.responses = list(responses)
+        self.calls = []
+
+    def complete_json(self, system_prompt, payload):
+        self.calls.append((system_prompt, payload))
+        return self.responses.pop(0)
+
+
+def make_grounded_pipeline(chat_client) -> ProductionQueryPipeline:
+    text = (
+        "Randomized controlled trial in SMPP children. Low dose "
+        "methylprednisolone with antibiotics was supported for fever duration."
+    )
+    hit = RankedHit(
+        record_id="chunk-1",
+        document_id="doc-1",
+        source="vector_fulltext",
+        rank=1,
+        score=0.9,
+        text=text,
+        payload={"page_start": 3, "page_end": 3},
+    )
+    document = RetrievedDocument(
+        document_id="doc-1",
+        fused_score=1.0,
+        final_score=0.9,
+        supporting_hits=(hit,),
+        payload={"title": "Randomized controlled trial", "year": 2025},
+    )
+    context = QueryContext(
+        raw_question="question",
+        normalized_fts_query="question",
+        population_terms=(),
+        intervention_terms=(),
+        comparator_terms=(),
+        outcome_terms=(),
+        safety_focused=False,
+        year_from=None,
+        year_to=None,
+        evidence_types=(),
+        fulltext_only=False,
+    )
+
+    class Retriever:
+        def search(self, question, filters):
+            return RetrievalResult("hybrid", "", (document,), 1, context)
+
+    class Documents:
+        def document_detail(self, document_id):
+            return {
+                "title": "Randomized controlled trial",
+                "abstract": "Trial abstract",
+                "year": 2025,
+                "evidence_type": "randomized_controlled_trial",
+                "classification_confidence": 0.9,
+                "quality": "high",
+            }
+
+    return ProductionQueryPipeline(
+        retriever=Retriever(),
+        document_store=Documents(),
+        evidence_refiner=ChatEvidenceRefiner(chat_client),
+        claim_extractor=GroundedClaimExtractor(chat_client),
+        graph_builder=LocalGraphBuilder(),
+        reporter=GroundedReporter(chat_client),
+    )
+
+
+def grounded_chat_responses() -> tuple[dict, dict]:
+    return (
+        {
+            "claims": [
+                {
+                    "source_number": 1,
+                    "source_chunk_ids": ["chunk-1"],
+                    "population": "SMPP children",
+                    "intervention": "methylprednisolone",
+                    "comparator": "antibiotics",
+                    "design": "randomized controlled trial",
+                    "sample_size": "",
+                    "dose": "low dose",
+                    "outcome": "fever duration",
+                    "direction": "supports",
+                    "effect_measures": [],
+                    "safety_signal": False,
+                    "limitations": [],
+                    "statement": "Low dose was supported.",
+                    "source_quote": (
+                        "Low dose methylprednisolone with antibiotics was "
+                        "supported for fever duration"
+                    ),
+                }
+            ]
+        },
+        {
+            "analysis_steps": [
+                {"title": "Evidence", "body": "One RCT.[1]", "source_ids": [1]}
+            ],
+            "final_answer_markdown": "Low dose is supported.[1]",
+        },
     )
 
 
@@ -132,6 +243,170 @@ def test_model_status_never_exposes_api_key(tmp_path: Path) -> None:
     assert status["configured"] is False
     assert status["chat_model"] == "chat-model"
     assert "api_key" not in status
+
+
+def test_query_model_config_creates_one_ephemeral_client_without_leaking_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created = []
+    received = []
+
+    class RecordingChatClient:
+        def __init__(self, base_url, api_key, model):
+            self.model = model
+            self.config = (base_url, api_key, model)
+            created.append(self)
+
+    class RequestPipeline:
+        def run(self, question, filters, *, chat_client):
+            received.append(chat_client)
+            result = FakeQueryPipeline().run(question, filters)
+            result["model_name"] = chat_client.model
+            return result
+
+    monkeypatch.setattr(service_module, "ChatClient", RecordingChatClient)
+    pipeline = RequestPipeline()
+    service = make_service(tmp_path, pipeline=pipeline)
+    settings_before = vars(service.settings).copy()
+    model_config = {
+        "base_url": "https://override.example/v1",
+        "api_key": "request-only-secret-token",
+        "model_name": "request-model",
+    }
+
+    result = service.query(
+        "clinical question", SearchFilters(), model_config=model_config
+    )
+
+    assert len(created) == 1
+    assert created[0].config == (
+        "https://override.example/v1",
+        "request-only-secret-token",
+        "request-model",
+    )
+    assert received == [created[0]]
+    assert result["model_name"] == "request-model"
+    assert vars(service.settings) == settings_before
+    assert vars(pipeline) == {}
+    assert "request-only-secret-token" not in repr(result)
+    assert "request-only-secret-token" not in repr(service)
+    assert "request-only-secret-token" not in repr(created[0])
+
+
+def test_query_without_model_config_supports_legacy_pipeline_and_no_new_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class UnexpectedChatClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("request ChatClient must not be constructed")
+
+    monkeypatch.setattr(service_module, "ChatClient", UnexpectedChatClient)
+
+    result = make_service(tmp_path).query("clinical question", SearchFilters())
+
+    assert result["model_name"] == "test-model"
+
+
+def test_chat_components_share_the_same_ephemeral_client() -> None:
+    chat_client = object()
+
+    evidence_refiner, claim_extractor, reporter = service_module._chat_components(
+        chat_client
+    )
+
+    assert isinstance(evidence_refiner, ChatEvidenceRefiner)
+    assert isinstance(claim_extractor, GroundedClaimExtractor)
+    assert isinstance(reporter, GroundedReporter)
+    assert evidence_refiner.chat_client is chat_client
+    assert claim_extractor.chat_client is chat_client
+    assert reporter.chat_client is chat_client
+
+
+def test_production_pipeline_request_chat_replaces_all_default_chat_components(
+) -> None:
+    default_chat = SequencedChat("server-model")
+    request_chat = SequencedChat("request-model", *grounded_chat_responses())
+    pipeline = make_grounded_pipeline(default_chat)
+    default_components = (
+        pipeline.evidence_refiner,
+        pipeline.claim_extractor,
+        pipeline.reporter,
+    )
+
+    result = pipeline.run(
+        "question", SearchFilters(), chat_client=request_chat
+    )
+
+    assert len(request_chat.calls) == 2
+    assert default_chat.calls == []
+    assert result["model_used"] is True
+    assert result["model_name"] == "request-model"
+    assert (
+        pipeline.evidence_refiner,
+        pipeline.claim_extractor,
+        pipeline.reporter,
+    ) == default_components
+
+
+def test_sequential_model_overrides_use_distinct_unchanged_clients(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created = []
+    received = []
+
+    class RecordingChatClient:
+        def __init__(self, base_url, api_key, model):
+            self.model = model
+            self.config = (base_url, api_key, model)
+            created.append(self)
+
+    class RequestPipeline:
+        def run(self, question, filters, *, chat_client):
+            received.append(chat_client)
+            result = FakeQueryPipeline().run(question, filters)
+            result["model_name"] = chat_client.model
+            return result
+
+    monkeypatch.setattr(service_module, "ChatClient", RecordingChatClient)
+    pipeline = RequestPipeline()
+    service = make_service(tmp_path, pipeline=pipeline)
+    settings_before = vars(service.settings).copy()
+    first_config = {
+        "base_url": "https://first.example/v1",
+        "api_key": "first-placeholder-key",
+        "model_name": "first-model",
+    }
+    second_config = {
+        "base_url": "https://second.example/v1",
+        "api_key": "second-placeholder-key",
+        "model_name": "second-model",
+    }
+
+    first_result = service.query(
+        "first question", SearchFilters(), model_config=first_config
+    )
+    first_client_config = created[0].config
+    second_result = service.query(
+        "second question", SearchFilters(), model_config=second_config
+    )
+
+    assert len(created) == 2
+    assert received == created
+    assert created[0] is not created[1]
+    assert created[0].config == first_client_config == (
+        "https://first.example/v1",
+        "first-placeholder-key",
+        "first-model",
+    )
+    assert created[1].config == (
+        "https://second.example/v1",
+        "second-placeholder-key",
+        "second-model",
+    )
+    assert first_result["model_name"] == "first-model"
+    assert second_result["model_name"] == "second-model"
+    assert vars(service.settings) == settings_before
+    assert vars(pipeline) == {}
 
 
 def test_knowledge_base_is_not_ready_until_local_index_is_complete(tmp_path: Path) -> None:
