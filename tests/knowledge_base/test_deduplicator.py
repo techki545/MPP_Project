@@ -135,6 +135,18 @@ def test_match_pdf_prefers_the_longest_complete_doi_in_a_filename() -> None:
     assert result.method == "doi"
 
 
+def test_match_pdf_returns_ambiguity_for_same_length_known_dois() -> None:
+    first = _document("doc-first", "First Trial", doi="10.1000/abc")
+    second = _document("doc-second", "Second Trial", doi="10.2000/xyz")
+    lookup = DocumentLookup.from_documents((("1", first), ("2", second)))
+
+    result = match_pdf(Path("10.1000%2Fabc 10.2000%2Fxyz.pdf"), lookup)
+
+    assert result.document_id is None
+    assert result.method == "ambiguous"
+    assert result.ambiguous_ids == ("doc-first", "doc-second")
+
+
 def test_match_pdf_uses_normalized_numeric_source_id_prefix() -> None:
     document = _document("doc-12", "MPP Steroid Trial", source_id="12")
 

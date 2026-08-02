@@ -147,19 +147,20 @@ def match_pdf(
         raise ValueError("Pass either lookup or documents_by_source_id, not both")
     filename = unquote(Path(path).stem)
 
-    extracted_dois = sorted(
-        {
-            candidate
-            for doi in _DOI_IN_FILENAME.findall(filename)
-            for candidate in _known_doi_candidates(doi, lookup.dois)
-        },
-        key=len,
-        reverse=True,
-    )
-    for doi in extracted_dois:
-        result = _result_for_candidates(
-            lookup.dois.get(doi, ()), "doi", 1.0
-        )
+    extracted_dois = {
+        candidate
+        for doi in _DOI_IN_FILENAME.findall(filename)
+        for candidate in _known_doi_candidates(doi, lookup.dois)
+    }
+    if extracted_dois:
+        strongest_doi_length = max(len(doi) for doi in extracted_dois)
+        strongest_document_ids = {
+            document_id
+            for doi in extracted_dois
+            if len(doi) == strongest_doi_length
+            for document_id in lookup.dois.get(doi, ())
+        }
+        result = _result_for_candidates(strongest_document_ids, "doi", 1.0)
         if result is not None:
             return result
 
