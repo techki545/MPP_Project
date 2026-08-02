@@ -81,3 +81,24 @@ def test_job_database_never_persists_secrets(tmp_path) -> None:
         serialized = json.dumps(connection.execute("SELECT * FROM jobs").fetchall())
     assert "must-not-be-saved" not in serialized
     assert "api_key" not in serialized
+
+
+class EmbeddingPendingIndexer:
+    def build(self, *, should_pause, confirm_embedding_cost, **options):
+        return {
+            "final_state": "embedding_pending",
+            "pending_embedding_count": 128,
+        }
+
+
+def test_job_manager_preserves_embedding_pending_terminal_state(tmp_path) -> None:
+    manager = KnowledgeBaseJobManager(
+        indexer=EmbeddingPendingIndexer(),
+        store_path=tmp_path / "jobs.sqlite3",
+    )
+
+    job = manager.start_build(confirm_embedding_cost=False)
+    final = manager.wait(job.job_id, timeout=5)
+
+    assert final.state == "embedding_pending"
+    assert final.progress["pending_embedding_count"] == 128

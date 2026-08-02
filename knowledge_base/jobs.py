@@ -15,7 +15,13 @@ from .errors import KnowledgeBaseError
 
 
 _ACTIVE_STATES = {"queued", "running", "pausing"}
-_TERMINAL_STATES = {"paused", "completed", "failed"}
+_TERMINAL_STATES = {
+    "paused",
+    "completed",
+    "completed_with_errors",
+    "embedding_pending",
+    "failed",
+}
 _SENSITIVE_OPTION_MARKERS = ("key", "token", "secret", "password", "authorization")
 
 
@@ -161,7 +167,12 @@ class KnowledgeBaseJobManager:
             reported_state = str(
                 progress.get("state", progress.get("final_state", "completed"))
             )
-            state = "paused" if reported_state == "paused" else "completed"
+            state = (
+                reported_state
+                if reported_state
+                in {"paused", "completed_with_errors", "embedding_pending"}
+                else "completed"
+            )
             error_code = ""
         except KnowledgeBaseError as error:
             progress = {}

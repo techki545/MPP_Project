@@ -82,3 +82,46 @@ def test_not_built_uses_explicit_demo_fallback() -> None:
     assert result["data_source"] == "demo"
     assert result["warning"]
     assert all(source["data_source"] == "demo" for source in result["sources"])
+
+
+class FakeJobManager:
+    def __init__(self):
+        self.calls = []
+
+    def start_build(self, *, confirm_embedding_cost, options):
+        self.calls.append((confirm_embedding_cost, dict(options)))
+
+        class Record:
+            def as_dict(self):
+                return {"job_id": "job-1", "state": "queued", "progress": {}}
+
+        return Record()
+
+
+def test_web_build_requires_a_bounded_embedding_probe_before_full_confirmation() -> None:
+    manager = FakeJobManager()
+    service = GraphRAGWebService(
+        load_default_graph(str(Path(__file__).resolve().parents[1])),
+        knowledge_service=FakeKnowledgeService(),
+        job_manager=manager,
+    )
+
+    with pytest.raises(APIError) as missing_limit:
+        service.start_build({"confirm_embedding_cost": True})
+    assert missing_limit.value.code == "embedding_probe_limit_required"
+
+    service.start_build(
+        {"confirm_embedding_cost": True, "embedding_limit": 32}
+    )
+    assert manager.calls[-1] == (True, {"embedding_limit": 32})
+
+    service.start_build(
+        {
+            "confirm_embedding_cost": True,
+            "confirm_full_embedding_cost": True,
+        }
+    )
+    assert manager.calls[-1] == (
+        True,
+        {"confirm_full_embedding_cost": True},
+    )

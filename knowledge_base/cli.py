@@ -12,7 +12,12 @@ from typing import Sequence
 from .config import Settings
 from .embedding_client import EmbeddingClient
 from .errors import ConfigurationError, KnowledgeBaseError
-from .indexer import BuildPipeline, Indexer, build_default_pipeline
+from .indexer import (
+    BuildPipeline,
+    Indexer,
+    build_default_pipeline,
+    validate_embedding_cost_gate,
+)
 from .models import SearchFilters
 from .service import create_production_service
 from .sqlite_store import SQLiteStore
@@ -41,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--document-limit", type=_positive_int)
     build.add_argument("--embedding-limit", type=_positive_int)
     build.add_argument("--confirm-embedding-cost", action="store_true")
+    build.add_argument("--confirm-full-embedding-cost", action="store_true")
     build.add_argument("--json", action="store_true")
 
     status = commands.add_parser("status")
@@ -56,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(*BuildPipeline.LOCAL_STAGES, "embedding", "vector"),
     )
     retry.add_argument("--confirm-embedding-cost", action="store_true")
+    retry.add_argument("--confirm-full-embedding-cost", action="store_true")
     retry.add_argument("--json", action="store_true")
 
     query = commands.add_parser("query")
@@ -120,7 +127,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 indexer = _make_indexer(settings, store)
                 payload = indexer.request_pause()
             elif args.command in {"build", "retry"}:
-                confirm_cost = bool(args.confirm_embedding_cost)
+                full_confirmation = bool(args.confirm_full_embedding_cost)
+                confirm_cost = bool(args.confirm_embedding_cost or full_confirmation)
+                embedding_limit = getattr(args, "embedding_limit", None)
+                validate_embedding_cost_gate(
+                    store,
+                    model_name=settings.embedding_model,
+                    confirm_embedding_cost=confirm_cost,
+                    confirm_full_embedding_cost=full_confirmation,
+                    embedding_limit=embedding_limit,
+                )
                 vector_store: LocalVectorStore | None = None
                 embedding_client: EmbeddingClient | None = None
                 if confirm_cost:
@@ -152,9 +168,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     result = indexer.build(
                         pipeline,
                         document_limit=getattr(args, "document_limit", None),
-                        embedding_limit=getattr(args, "embedding_limit", None),
+                        embedding_limit=embedding_limit,
                         confirm_embedding_cost=confirm_cost,
                     )
+                    if (
+                        confirm_cost
+                        and not full_confirmation
+                        and embedding_limit is not None
+                        and result.stage_counters.get("embedding", {}).get("processed", 0)
+                        > 0
+                        and result.stage_counters.get("embedding", {}).get("failed", 0)
+                        == 0
+                    ):
+                        store.mark_embedding_probe_completed(
+                            settings.embedding_model
+                        )
                     payload = result.as_dict()
                 finally:
                     if vector_store is not None:

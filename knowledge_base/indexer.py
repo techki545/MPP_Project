@@ -305,11 +305,20 @@ class Indexer:
                     result = self._build_result(stage_counters, "paused")
                     self.store.set_job_state(self.JOB_ID, "paused", result.as_dict())
                     return result
-                self.store.set_job_state(
-                    self.JOB_ID,
-                    "running",
-                    {"stage": stage, "stage_counters": self._plain_counters(stage_counters)},
-                )
+                progress = {
+                    "stage": stage,
+                    "stage_counters": self._plain_counters(stage_counters),
+                }
+                if not self.store.update_job_running_progress(self.JOB_ID, progress):
+                    result = self._build_result(stage_counters, "paused")
+                    self.store.set_job_state(self.JOB_ID, "paused", result.as_dict())
+                    return result
+
+        if (
+            document_limit is None
+            and set(pipeline.stages) == set(BuildPipeline.LOCAL_STAGES)
+        ):
+            self.store.mark_local_index_ready(pipeline.algorithm_version)
 
         embedding = self._embed_pending_unlocked(
             confirm_embedding_cost=confirm_embedding_cost,
@@ -353,7 +362,11 @@ class Indexer:
                 "embedding_config_missing", "Embedding dependencies are not configured"
             )
 
-        selected = all_pending if embedding_limit is None else all_pending[:embedding_limit]
+        selected = (
+            all_pending
+            if embedding_limit is None
+            else self._balanced_embedding_selection(all_pending, embedding_limit)
+        )
         completed = 0
         failed = 0
         for start in range(0, len(selected), self.embedding_batch_size):
@@ -404,6 +417,24 @@ class Indexer:
 
         pending = len(self.store.list_pending_embedding_items(self.model_name))
         return EmbeddingRunResult(completed, skipped, failed, pending)
+
+    @staticmethod
+    def _balanced_embedding_selection(
+        items: list[EmbeddingItem], limit: int
+    ) -> list[EmbeddingItem]:
+        metadata = [item for item in items if item.kind == "metadata"]
+        fulltext = [item for item in items if item.kind == "chunk"]
+        selected: list[EmbeddingItem] = []
+        for index in range(max(len(metadata), len(fulltext))):
+            if index < len(metadata):
+                selected.append(metadata[index])
+            if len(selected) >= limit:
+                break
+            if index < len(fulltext):
+                selected.append(fulltext[index])
+            if len(selected) >= limit:
+                break
+        return selected
 
     def _vectors_for_batch(self, batch: list[EmbeddingItem]) -> list[list[float]]:
         vectors: list[list[float] | None] = [None] * len(batch)
@@ -527,6 +558,35 @@ class Indexer:
         return {stage: dict(counters) for stage, counters in values.items()}
 
 
+def validate_embedding_cost_gate(
+    store: SQLiteStore,
+    *,
+    model_name: str,
+    confirm_embedding_cost: bool,
+    confirm_full_embedding_cost: bool,
+    embedding_limit: int | None,
+) -> None:
+    if confirm_full_embedding_cost and not confirm_embedding_cost:
+        raise KnowledgeBaseError(
+            "embedding_confirmation_invalid",
+            "Full embedding confirmation requires embedding cost confirmation",
+        )
+    if not confirm_embedding_cost:
+        return
+    if confirm_full_embedding_cost:
+        if not store.embedding_probe_completed(model_name):
+            raise KnowledgeBaseError(
+                "embedding_probe_required",
+                "A successful bounded embedding probe is required before the full run",
+            )
+        return
+    if embedding_limit is None or embedding_limit > 32:
+        raise KnowledgeBaseError(
+            "embedding_probe_limit_required",
+            "The first paid embedding run must be limited to at most 32 texts",
+        )
+
+
 def build_default_pipeline(
     source_dir: Path,
     *,
@@ -552,6 +612,7 @@ def build_default_pipeline(
     pdf_hash_cache: dict[Path, str] = {}
     metadata_fingerprint = _combined_file_hash(csv_paths)
     lookup_cache: dict[str, DocumentLookup] = {}
+    canonical_pdf_cache: dict[Path, Path] = {}
 
     def metadata_items() -> Iterable[BuildItem]:
         imported_rows = 0
@@ -596,11 +657,18 @@ def build_default_pipeline(
             )
 
     def inventory_items() -> Iterable[BuildItem]:
+        canonical_paths = canonical_pdf_paths()
         for path in pdf_paths:
             digest = pdf_digest(path)
             file_id = _file_id(path)
+            is_duplicate = canonical_paths[path] != path
 
-            def inventory(path=path, digest=digest, file_id=file_id) -> dict[str, int]:
+            def inventory(
+                path=path,
+                digest=digest,
+                file_id=file_id,
+                is_duplicate=is_duplicate,
+            ) -> dict[str, int]:
                 store.upsert_file(
                     FileRecord(
                         file_id=file_id,
@@ -608,12 +676,15 @@ def build_default_pipeline(
                         sha256=digest,
                         size_bytes=path.stat().st_size,
                         document_id=None,
-                        match_method="",
+                        match_method="sha256_duplicate" if is_duplicate else "",
                         match_confidence=0.0,
-                        status="inventoried",
+                        status="duplicate" if is_duplicate else "inventoried",
                     )
                 )
-                return {"pdf_files": 1}
+                return {
+                    "pdf_files": 1,
+                    **({"duplicate": 1} if is_duplicate else {}),
+                }
 
             yield BuildItem(file_id, digest, inventory)
 
@@ -631,11 +702,19 @@ def build_default_pipeline(
 
     def match_items() -> Iterable[BuildItem]:
         lookup = document_lookup()
+        canonical_paths = canonical_pdf_paths()
         for path in pdf_paths:
             digest = pdf_digest(path)
             file_id = _file_id(path)
+            if canonical_paths[path] != path:
+                yield BuildItem(
+                    file_id,
+                    sha256(f"{digest}|sha256-duplicate|pdf-match-v2".encode("utf-8")).hexdigest(),
+                    lambda: {"duplicate": 1},
+                )
+                continue
             input_hash = sha256(
-                f"{digest}|{metadata_fingerprint}|pdf-match-v1".encode("utf-8")
+                f"{digest}|{metadata_fingerprint}|pdf-match-v2".encode("utf-8")
             ).hexdigest()
 
             def match_one(
@@ -764,6 +843,14 @@ def build_default_pipeline(
             digest = hash_file(path)
             pdf_hash_cache[path] = digest
         return digest
+
+    def canonical_pdf_paths() -> dict[Path, Path]:
+        if not canonical_pdf_cache:
+            first_by_digest: dict[str, Path] = {}
+            for path in pdf_paths:
+                digest = pdf_digest(path)
+                canonical_pdf_cache[path] = first_by_digest.setdefault(digest, path)
+        return canonical_pdf_cache
 
     return BuildPipeline(
         stages={

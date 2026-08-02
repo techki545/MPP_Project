@@ -296,3 +296,51 @@ def test_candidate_pool_is_bounded_and_safety_evidence_is_retained() -> None:
     assert result.candidate_count == 200
     assert len(result.documents) == 15
     assert "doc-005" in {item.document_id for item in result.documents}
+
+
+def test_pediatric_query_excludes_explicit_adult_only_evidence() -> None:
+    adult = replace(
+        hit("doc-adult", "doc-adult", "metadata", 1),
+        text="Treatment outcomes in adults with Mycoplasma pneumoniae pneumonia",
+        payload={
+            "document_id": "doc-adult",
+            "title": "MPP treatment in adult patients",
+            "abstract": "A cohort of adults aged 40 years.",
+            "evidence_type": "observational_study",
+            "year": 2024,
+        },
+    )
+    pediatric = replace(
+        hit("doc-child", "doc-child", "metadata", 2),
+        text="Treatment outcomes in children with Mycoplasma pneumoniae pneumonia",
+        payload={
+            "document_id": "doc-child",
+            "title": "MPP treatment in children",
+            "abstract": "A pediatric cohort.",
+            "evidence_type": "observational_study",
+            "year": 2024,
+        },
+    )
+
+    result = HybridRetriever(
+        FakeEmbeddingClient(),
+        FakeVectorStore(metadata=[adult, pediatric]),
+        FakeLexicalStore(metadata=[adult, pediatric]),
+    ).search("儿童肺炎支原体肺炎如何治疗？", SearchFilters())
+
+    assert [item.document_id for item in result.documents] == ["doc-child"]
+
+
+def test_pediatric_query_retains_evidence_with_unspecified_population() -> None:
+    unspecified = replace(
+        hit("doc-unknown", "doc-unknown", "metadata", 1),
+        text="Mycoplasma pneumoniae treatment guideline",
+    )
+
+    result = HybridRetriever(
+        FakeEmbeddingClient(),
+        FakeVectorStore(metadata=[unspecified]),
+        FakeLexicalStore(),
+    ).search("SMPP儿童如何治疗？", SearchFilters())
+
+    assert [item.document_id for item in result.documents] == ["doc-unknown"]

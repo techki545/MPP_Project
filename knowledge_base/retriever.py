@@ -43,6 +43,16 @@ _POPULATION_TERMS = (
     "婴幼儿",
     "青少年",
 )
+_ADULT_POPULATION_TERMS = (
+    "adult",
+    "adults",
+    "elderly",
+    "older patients",
+    "成人",
+    "成年人",
+    "老年人",
+    "老年患者",
+)
 _INTERVENTION_TERMS = (
     "low dose",
     "steroid",
@@ -257,7 +267,7 @@ class HybridRetriever:
             else:
                 degraded_reason = ""
 
-        candidates = self._fuse(lists, active_filters)
+        candidates = self._fuse(lists, active_filters, context)
         ranked = self._rerank(candidates)
         selected = self._select_evidence_package(ranked, context)
         return RetrievalResult(
@@ -305,7 +315,10 @@ class HybridRetriever:
         return results, failures > 0, successes > 0
 
     def _fuse(
-        self, lists: Iterable[Iterable[RankedHit]], filters: SearchFilters
+        self,
+        lists: Iterable[Iterable[RankedHit]],
+        filters: SearchFilters,
+        context: QueryContext,
     ) -> list[_Candidate]:
         unique_hits: dict[tuple[str, str], RankedHit] = {}
         for result_list in lists:
@@ -323,6 +336,8 @@ class HybridRetriever:
         for document_id, hits in grouped.items():
             selected_hits = _bounded_supporting_hits(hits)
             payload = _merge_payload(selected_hits)
+            if not _matches_population_context(payload, selected_hits, context):
+                continue
             if not _matches_filters(payload, selected_hits, filters):
                 continue
             fused_score = sum(1.0 / (self.RRF_K + item.rank) for item in selected_hits)
@@ -570,6 +585,33 @@ def _matches_filters(
     ):
         return False
     return True
+
+
+def _matches_population_context(
+    payload: dict[str, Any],
+    hits: Iterable[RankedHit],
+    context: QueryContext,
+) -> bool:
+    if not context.population_terms:
+        return True
+    text_parts = [
+        str(payload.get("title", "")),
+        str(payload.get("abstract", "")),
+        str(payload.get("population", "")),
+    ]
+    for hit in hits:
+        text_parts.extend(
+            (
+                hit.text,
+                str(hit.payload.get("title", "")),
+                str(hit.payload.get("abstract", "")),
+                str(hit.payload.get("population", "")),
+            )
+        )
+    normalized = unicodedata.normalize("NFKC", " ".join(text_parts)).casefold()
+    pediatric_signal = any(term in normalized for term in _POPULATION_TERMS)
+    adult_signal = any(term in normalized for term in _ADULT_POPULATION_TERMS)
+    return not (adult_signal and not pediatric_signal)
 
 
 def _recency_scores(candidates: Iterable[_Candidate]) -> dict[str, float]:

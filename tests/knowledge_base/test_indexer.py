@@ -12,6 +12,7 @@ from knowledge_base.indexer import (
     BuildPipeline,
     Indexer,
     build_default_pipeline,
+    validate_embedding_cost_gate,
 )
 from knowledge_base.models import ChunkRecord, DocumentRecord, FileRecord
 from knowledge_base.sqlite_store import SQLiteStore
@@ -212,6 +213,37 @@ def test_pause_request_is_observed_after_completed_item(tmp_path: Path) -> None:
 
     assert result.final_state == "paused"
     assert calls == ["first"]
+    assert store.get_job(Indexer.JOB_ID)["state"] == "paused"
+
+
+def test_pause_request_wins_race_with_running_progress_update(tmp_path: Path) -> None:
+    class PauseRacingStore(SQLiteStore):
+        def __init__(self, path: Path) -> None:
+            super().__init__(path)
+            self.inject_pause = True
+
+        def update_job_running_progress(self, job_id, progress):
+            if self.inject_pause:
+                self.inject_pause = False
+                self.set_job_state(job_id, "pause_requested", {"completed": 1})
+            return super().update_job_running_progress(job_id, progress)
+
+    store = PauseRacingStore(tmp_path / "manifest.sqlite3")
+    store.initialize()
+    pipeline = BuildPipeline(
+        stages={
+            "metadata": lambda: (
+                BuildItem("one", "hash-one", lambda: {"documents": 1}),
+            )
+        },
+        algorithm_version="test-v1",
+    )
+
+    result = _indexer(tmp_path, store).build(
+        pipeline, confirm_embedding_cost=False
+    )
+
+    assert result.final_state == "paused"
     assert store.get_job(Indexer.JOB_ID)["state"] == "paused"
 
 
@@ -431,3 +463,101 @@ def test_default_pipeline_hashes_each_pdf_once_per_run(tmp_path: Path, monkeypat
     )
 
     assert sum(path.suffix.lower() == ".pdf" for path in calls) == 1
+
+
+def test_default_pipeline_marks_duplicate_pdf_and_chunks_only_canonical_file(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "corpus"
+    source.mkdir()
+    (source / "metadata.csv").write_text(
+        "ID,Author,Publication Year,Title,Publication Title,DOI,Url,Abstract Note,Language\n"
+        "1,Zhang,2025,Steroid Trial,Journal,,,Randomized treatment evidence,en\n",
+        encoding="utf-8",
+    )
+    canonical = source / "1-Steroid Trial.pdf"
+    duplicate = source / "1-Steroid Trial copy.pdf"
+    pdf = pymupdf.open()
+    page = pdf.new_page()
+    page.insert_text(
+        (72, 72),
+        "Methods randomized treatment evidence with enough characters for extraction. "
+        "Results low dose treatment improved recovery without severe events.",
+    )
+    pdf.save(canonical)
+    pdf.close()
+    duplicate.write_bytes(canonical.read_bytes())
+    store = SQLiteStore(tmp_path / "manifest.sqlite3")
+    store.initialize()
+
+    result = _indexer(tmp_path, store).build(
+        build_default_pipeline(source, store=store, ocr=lambda _: ""),
+        confirm_embedding_cost=False,
+    )
+
+    files = store.list_files()
+    assert len(files) == 2
+    assert sum(item.status == "duplicate" for item in files) == 1
+    assert result.stage_counters["pdf_match"]["duplicate"] == 1
+    parsed = [item for item in files if item.status in {"parsed", "partial"}]
+    assert len(parsed) == 1
+    document_id = parsed[0].document_id
+    assert document_id is not None
+    chunks = store.list_chunks_for_document(document_id, limit=100)
+    assert chunks
+    assert {chunk.file_id for chunk in chunks} == {parsed[0].file_id}
+
+
+def test_full_embedding_gate_requires_a_successful_bounded_probe(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "manifest.sqlite3")
+    store.initialize()
+
+    with pytest.raises(KnowledgeBaseError) as missing_probe:
+        validate_embedding_cost_gate(
+            store,
+            model_name="embedding-model",
+            confirm_embedding_cost=True,
+            confirm_full_embedding_cost=True,
+            embedding_limit=None,
+        )
+    assert missing_probe.value.code == "embedding_probe_required"
+
+    store.mark_embedding_probe_completed("embedding-model")
+    validate_embedding_cost_gate(
+        store,
+        model_name="embedding-model",
+        confirm_embedding_cost=True,
+        confirm_full_embedding_cost=True,
+        embedding_limit=None,
+    )
+
+
+def test_bounded_embedding_probe_covers_metadata_and_fulltext(tmp_path: Path) -> None:
+    store = _seed_store(tmp_path)
+    for index in (2, 3):
+        store.upsert_document(
+            DocumentRecord(
+                document_id=f"doc-{index}",
+                source_row=index,
+                title=f"Metadata study {index}",
+                normalized_title=f"metadatastudy{index}",
+                authors=("Zhang",),
+                year=2025,
+                journal="Journal",
+                doi="",
+                normalized_doi="",
+                abstract="Metadata-only evidence",
+                language="en",
+            )
+        )
+    embedder = FakeEmbeddingClient()
+    vectors = FakeVectorStore()
+
+    result = _indexer(tmp_path, store, embedder, vectors).embed_pending(
+        confirm_embedding_cost=True,
+        embedding_limit=2,
+    )
+
+    assert result.completed_embeddings == 2
+    assert sum(len(batch) for batch in vectors.metadata_batches) == 1
+    assert sum(len(batch) for batch in vectors.fulltext_batches) == 1

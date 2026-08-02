@@ -610,6 +610,20 @@ def test_job_progress_and_error_records_round_trip(store: SQLiteStore):
     assert store.list_errors(stage="other") == []
 
 
+def test_running_progress_cannot_overwrite_pause_request(store: SQLiteStore):
+    store.set_job_state("job-1", "running", {"completed": 1})
+    store.set_job_state("job-1", "pause_requested", {"completed": 1})
+
+    updated = store.update_job_running_progress("job-1", {"completed": 2})
+
+    assert updated is False
+    assert store.get_job("job-1") == {
+        "job_id": "job-1",
+        "state": "pause_requested",
+        "progress": {"completed": 1},
+    }
+
+
 @pytest.mark.parametrize("limit", [0, -1])
 def test_non_positive_search_limit_raises_stable_domain_error(
     store: SQLiteStore, limit: int

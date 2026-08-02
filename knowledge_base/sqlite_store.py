@@ -327,6 +327,55 @@ class SQLiteStore:
                 ("metadata_reimport_required",),
             )
 
+    def mark_local_index_ready(self, algorithm_version: str) -> None:
+        if not str(algorithm_version).strip():
+            raise KnowledgeBaseError(
+                "index_version_invalid", "Local index version is invalid"
+            )
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO schema_info(key, value) VALUES ('local_index_ready', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (str(algorithm_version).strip(),),
+            )
+
+    def local_index_ready(self) -> bool:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT value FROM schema_info WHERE key = 'local_index_ready'"
+            ).fetchone()
+        return row is not None and bool(str(row["value"]).strip())
+
+    def mark_embedding_probe_completed(self, model_name: str) -> None:
+        key = self._embedding_probe_key(model_name)
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO schema_info(key, value) VALUES (?, '1')
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (key,),
+            )
+
+    def embedding_probe_completed(self, model_name: str) -> bool:
+        key = self._embedding_probe_key(model_name)
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT value FROM schema_info WHERE key = ?", (key,)
+            ).fetchone()
+        return row is not None and row["value"] == "1"
+
+    @staticmethod
+    def _embedding_probe_key(model_name: str) -> str:
+        clean = str(model_name).strip()
+        if not clean:
+            raise KnowledgeBaseError(
+                "embedding_model_invalid", "Embedding model is invalid"
+            )
+        return "embedding_probe:" + sha256(clean.encode("utf-8")).hexdigest()
+
     def journal_mode(self) -> str:
         with self._connection() as connection:
             row = connection.execute("PRAGMA journal_mode").fetchone()
@@ -816,6 +865,20 @@ class SQLiteStore:
                 """,
                 (job_id, state, json.dumps(progress, ensure_ascii=False, sort_keys=True)),
             )
+
+    def update_job_running_progress(
+        self, job_id: str, progress: dict[str, Any]
+    ) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE build_jobs
+                SET progress_json = ?
+                WHERE job_id = ? AND state = 'running'
+                """,
+                (json.dumps(progress, ensure_ascii=False, sort_keys=True), job_id),
+            )
+        return cursor.rowcount == 1
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         with self._connection() as connection:

@@ -19,3 +19,8 @@ node_modules/
 qdrant/
 ocr-cache/
 embedding-cache/
+*.pdf
+*.csv
+*.xls
+*.xlsx
+*.zip

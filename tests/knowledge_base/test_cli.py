@@ -18,6 +18,9 @@ def test_build_requires_explicit_embedding_confirmation() -> None:
     assert args.embedding_limit == 32
     assert args.document_limit is None
 
+    full = parser.parse_args(["build", "--confirm-full-embedding-cost"])
+    assert full.confirm_full_embedding_cost is True
+
 
 def test_inspect_accepts_read_only_source_override() -> None:
     parser = build_parser()
@@ -131,8 +134,32 @@ def test_cli_confirming_embeddings_requires_model_configuration(
     monkeypatch.delenv("MPP_API_KEY", raising=False)
     monkeypatch.delenv("MPP_API_BASE", raising=False)
 
-    exit_code = main(["build", "--confirm-embedding-cost", "--json"])
+    exit_code = main(
+        [
+            "build",
+            "--embedding-limit",
+            "32",
+            "--confirm-embedding-cost",
+            "--json",
+        ]
+    )
     error = json.loads(capsys.readouterr().err)
 
     assert exit_code == 2
     assert error["code"] == "embedding_config_missing"
+
+
+def test_cli_rejects_unbounded_first_embedding_confirmation(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    source = tmp_path / "corpus"
+    _write_tiny_corpus(source)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MPP_KB_SOURCE", str(source))
+    monkeypatch.setenv("MPP_KB_DATA", str(tmp_path / "data"))
+
+    exit_code = main(["build", "--confirm-embedding-cost", "--json"])
+    error = json.loads(capsys.readouterr().err)
+
+    assert exit_code == 2
+    assert error["code"] == "embedding_probe_limit_required"

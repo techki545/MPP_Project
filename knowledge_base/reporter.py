@@ -23,10 +23,44 @@ _EVIDENCE_TYPES = {
 }
 _DIRECTIONS = {"supports", "opposes", "uncertain"}
 _CITATION_PATTERN = re.compile(r"\[(\d+)\]")
+_CITATION_GROUP_PATTERN = re.compile(r"(?:\s*\[\d+\])+")
 _NUMBER_PATTERN = re.compile(r"(?<![\d.])(\d+(?:\.\d+)?)(?![\d.])")
-_NUMBER_UNIT_PATTERN = re.compile(
-    r"\d+(?:\.\d+)?\s*(?:%|mg|g|kg|ml|mmhg|day|days|week|weeks|month|months|year|years|h|hours|例|天|周|月|年)",
+_QUANTITY_PATTERN = re.compile(
+    r"(?<![\d.])(?P<number>\d+(?:\.\d+)?)\s*"
+    r"(?P<unit>mg\s*/\s*kg\s*/\s*(?:d|day|days)|"
+    r"mg\s*/\s*kg|mg|g|kg|ml|mmhg|%|"
+    r"children|child|patients?|participants?|cases?|"
+    r"days?|weeks?|months?|years?|hours?|h|"
+    r"名(?:儿童|患儿)?|例|天|日|周|月|年)",
     flags=re.IGNORECASE,
+)
+_GROUNDING_TOKEN_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*|[\u4e00-\u9fff]{2,}")
+_GROUNDING_STOPWORDS = {
+    "the",
+    "and",
+    "for",
+    "with",
+    "was",
+    "were",
+    "are",
+    "is",
+    "of",
+    "in",
+    "to",
+    "a",
+    "an",
+}
+_REPORT_HEADING_LABELS = frozenset(
+    {
+        "evidence answer",
+        "final answer",
+        "recommendation",
+        "conclusion",
+        "循证回答",
+        "综合回答",
+        "推荐意见",
+        "结论",
+    }
 )
 _MODEL_REPORT_PROMPT = """
 You are a clinical evidence synthesis engine. Return one JSON object with exactly
@@ -34,8 +68,11 @@ analysis_steps and final_answer_markdown. Explain retrieval inventory, evidence
 hierarchy, chronology, agreement, lower-level supplementation, limitations, and
 the final answer. Cite only the numbered sources supplied as [N]. Never invent a
 study, number, dose, effect size, confidence interval, source, or citation. Any
-quantitative value must appear in a cited source snippet. This is evidence support,
-not a substitute for an individual clinician's judgment.
+quantitative value must appear in a cited source snippet. In the final answer,
+put citations immediately after every substantive sentence and reuse a validated
+graph claim statement verbatim for each clinical assertion. Do not translate or
+paraphrase those claim statements. This is evidence support, not a substitute for
+an individual clinician's judgment.
 """.strip()
 _CLAIM_EXTRACTION_PROMPT = """
 Extract only source-grounded clinical claims from the numbered evidence snippets.
@@ -270,7 +307,11 @@ class GroundedClaimExtractor:
         ):
             return None, "missing_required_text"
         source_quote = " ".join(str(raw_claim["source_quote"]).split())
-        source_text = " ".join(" ".join(source.snippets).split())
+        source_text = ". ".join(
+            " ".join(value.split())
+            for value in (source.title, source.abstract, *source.snippets)
+            if value.strip()
+        )
         if source_quote.casefold() not in source_text.casefold():
             return None, "source_quote_not_found"
         effect_measures = _string_tuple(raw_claim.get("effect_measures"), allow_empty=True)
@@ -280,6 +321,31 @@ class GroundedClaimExtractor:
         safety_signal = raw_claim.get("safety_signal")
         if not isinstance(safety_signal, bool):
             return None, "invalid_safety_signal"
+        grounded_fields: list[object] = [
+            raw_claim.get("population"),
+            raw_claim.get("intervention"),
+            raw_claim.get("comparator"),
+            raw_claim.get("design"),
+            raw_claim.get("sample_size"),
+            raw_claim.get("dose"),
+            raw_claim.get("outcome"),
+            raw_claim.get("follow_up"),
+            *effect_measures,
+            *limitations,
+        ]
+        if any(
+            not _claim_field_is_grounded(value, source_text)
+            for value in grounded_fields
+            if _optional_scalar(value)
+        ):
+            return None, "claim_not_grounded"
+        if not _claim_statement_is_grounded(
+            str(raw_claim["statement"]), source_quote
+        ):
+            return None, "claim_not_grounded"
+        quoted_safety_signal = _quoted_safety_signal(source_quote)
+        if safety_signal != (quoted_safety_signal is True):
+            return None, "claim_not_grounded"
 
         cutoff = raw_claim.get("evidence_cutoff_year")
         if isinstance(cutoff, bool) or not isinstance(cutoff, (int, type(None))):
@@ -408,6 +474,7 @@ class GroundedReporter:
         if known_numbers and not final_citations:
             raise _ungrounded()
         _validate_statistics(final_answer, final_citations, sources)
+        _validate_report_claims(final_answer, bundle, sources)
         return tuple(validated_steps), final_answer
 
     def _deterministic_fallback(
@@ -419,6 +486,24 @@ class GroundedReporter:
             for source in bundle.sources
         ]
         body = "\n".join(inventory_lines) if inventory_lines else "未检索到可用证据。"
+        source_numbers = {
+            source.document_id: source.source_number for source in bundle.sources
+        }
+        claim_lines = [
+            f"- {claim['statement']}[{source_numbers[document_id]}]"
+            for document_id, claims in _graph_claims_by_document(bundle).items()
+            if document_id in source_numbers
+            for claim in claims
+        ]
+        if claim_lines:
+            fallback_answer = (
+                "模型综合文本未通过可追溯性校验。以下仅列出已经通过来源校验的证据主张：\n\n"
+                + "\n".join(claim_lines)
+            )
+        else:
+            fallback_answer = (
+                "模型生成结果未通过可追溯性校验。请依据上方证据清单和关系图进行人工判断。"
+            )
         return GeneratedReport(
             analysis_steps=(
                 {
@@ -432,9 +517,7 @@ class GroundedReporter:
                     "source_ids": [],
                 },
             ),
-            final_answer_markdown=(
-                "模型生成结果未通过可追溯性校验。请依据上方证据清单和关系图进行人工判断。"
-            ),
+            final_answer_markdown=fallback_answer,
             model_used=False,
             model_name=str(getattr(self.chat_client, "model", "configured-model")),
             model_error=error_code,
@@ -477,6 +560,88 @@ def _citation_ids(text: str) -> set[int]:
     return {int(value) for value in _CITATION_PATTERN.findall(text)}
 
 
+def _validate_report_claims(
+    text: str,
+    bundle: EvidenceBundle,
+    sources: dict[int, EvidenceSource],
+) -> None:
+    claims_by_document = _graph_claims_by_document(bundle)
+
+    saw_claim = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or _is_allowed_report_heading(line):
+            continue
+        cursor = 0
+        for match in _CITATION_GROUP_PATTERN.finditer(line):
+            segment = _clean_report_segment(line[cursor : match.start()])
+            cited_ids = _citation_ids(match.group(0))
+            if not segment or not cited_ids:
+                raise _ungrounded()
+            candidate_claims = [
+                claim
+                for source_number in cited_ids
+                for claim in claims_by_document.get(
+                    sources[source_number].document_id, []
+                )
+            ]
+            if not any(
+                _report_segment_is_grounded(segment, claim)
+                for claim in candidate_claims
+            ):
+                raise _ungrounded()
+            saw_claim = True
+            cursor = match.end()
+        if _clean_report_segment(line[cursor:]):
+            raise _ungrounded()
+    if not saw_claim:
+        raise _ungrounded()
+
+
+def _graph_claims_by_document(
+    bundle: EvidenceBundle,
+) -> dict[str, list[dict[str, str]]]:
+    claims_by_document: dict[str, list[dict[str, str]]] = {}
+    for node in bundle.graph.get("nodes", []):
+        if not isinstance(node, Mapping) or node.get("node_type") != "claim":
+            continue
+        payload = node.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        document_id = _optional_text(payload.get("document_id"))
+        statement = _optional_text(payload.get("statement"))
+        source_quote = _optional_text(payload.get("source_quote"))
+        if document_id and statement and source_quote:
+            claims_by_document.setdefault(document_id, []).append(
+                {"statement": statement, "source_quote": source_quote}
+            )
+    return claims_by_document
+
+
+def _clean_report_segment(text: str) -> str:
+    cleaned = re.sub(r"^[\s>*#`_\-+\d.)]+", "", text)
+    cleaned = re.sub(r"[*_`]+", "", cleaned)
+    return cleaned.strip(" \t\r\n:;,.")
+
+
+def _is_allowed_report_heading(line: str) -> bool:
+    if _citation_ids(line):
+        return False
+    cleaned = re.sub(r"^#+\s*", "", line.strip())
+    cleaned = cleaned.strip("*_` \t\r\n:：").casefold()
+    return cleaned in _REPORT_HEADING_LABELS
+
+
+def _report_segment_is_grounded(
+    segment: str, claim: Mapping[str, Any]
+) -> bool:
+    statement = _optional_text(claim.get("statement"))
+    source_quote = _optional_text(claim.get("source_quote"))
+    if _unicase(segment) == _unicase(statement).strip(" .;:"):
+        return True
+    return _claim_statement_is_grounded(segment, source_quote)
+
+
 def _validate_statistics(
     text: str,
     cited_ids: set[int],
@@ -491,13 +656,17 @@ def _validate_statistics(
         for source_number in cited_ids
         for snippet in sources[source_number].snippets
     )
+    quantities = _quantity_values(without_citations)
+    grounded_quantities = _quantity_values(cited_text)
+    if not quantities.issubset(grounded_quantities):
+        raise _ungrounded()
     grounded_values = {match.group(1) for match in _NUMBER_PATTERN.finditer(cited_text)}
     if not values.issubset(grounded_values):
         raise _ungrounded()
 
 
 def _statistical_values(text: str) -> set[str]:
-    unit_spans = [match.span() for match in _NUMBER_UNIT_PATTERN.finditer(text)]
+    unit_spans = [match.span() for match in _QUANTITY_PATTERN.finditer(text)]
     values: set[str] = set()
     for match in _NUMBER_PATTERN.finditer(text):
         raw = match.group(1)
@@ -512,6 +681,122 @@ def _statistical_values(text: str) -> set[str]:
         if in_unit or effect_context or "." in raw or numeric >= 20:
             values.add(raw)
     return values
+
+
+def _claim_text_is_grounded(value: object, source_text: str) -> bool:
+    text = _optional_scalar(value)
+    if not text:
+        return True
+    if not _quantity_values(text).issubset(_quantity_values(source_text)):
+        return False
+    values = _statistical_values(text)
+    grounded_values = {
+        match.group(1) for match in _NUMBER_PATTERN.finditer(source_text)
+    }
+    if not values.issubset(grounded_values):
+        return False
+    source_normalized = _unicase(source_text)
+    tokens = {
+        token
+        for token in _GROUNDING_TOKEN_PATTERN.findall(_unicase(text))
+        if token not in _GROUNDING_STOPWORDS and not token.isdigit()
+    }
+    if not tokens:
+        return bool(values or _quantity_values(text))
+    return all(token in source_normalized for token in tokens)
+
+
+def _claim_field_is_grounded(value: object, source_text: str) -> bool:
+    text = _optional_scalar(value)
+    if not text:
+        return True
+    text_has_negation = _has_negation(text)
+    return any(
+        _claim_text_is_grounded(text, sentence)
+        and text_has_negation == _has_negation(sentence)
+        for sentence in _grounding_clauses(source_text)
+        if sentence.strip()
+    )
+
+
+def _claim_statement_is_grounded(statement: str, source_quote: str) -> bool:
+    statement_has_negation = _has_negation(statement)
+    for sentence in _grounding_clauses(source_quote):
+        if not sentence.strip() or not _claim_text_is_grounded(statement, sentence):
+            continue
+        if statement_has_negation == _has_negation(sentence):
+            return True
+    return False
+
+
+def _grounding_clauses(text: str) -> tuple[str, ...]:
+    return tuple(
+        clause.strip()
+        for clause in re.split(
+            r"[.!?;。！？；]+|\b(?:but|however|whereas|although|while)\b|(?:但是|但|然而|而|却|相比之下)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if clause.strip()
+    )
+
+
+def _has_negation(text: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:no|not|without|neither|nor|non-significant)\b|无|未|不|没有|未见",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _quoted_safety_signal(text: str) -> bool | None:
+    signals = [
+        not _has_negation(clause)
+        for clause in _grounding_clauses(text)
+        if re.search(
+            r"\b(?:safety|adverse|harm|risk|bleeding|infection)\b|安全|不良|风险|出血|感染",
+            clause,
+            flags=re.IGNORECASE,
+        )
+    ]
+    return any(signals) if signals else None
+
+
+def _quantity_values(text: str) -> set[tuple[str, str]]:
+    return {
+        (_normalize_number(match.group("number")), _normalize_unit(match.group("unit")))
+        for match in _QUANTITY_PATTERN.finditer(text)
+    }
+
+
+def _normalize_number(value: str) -> str:
+    numeric = float(value)
+    return str(int(numeric)) if numeric.is_integer() else format(numeric, "g")
+
+
+def _normalize_unit(value: str) -> str:
+    unit = re.sub(r"\s+", "", value.casefold())
+    if unit in {"child", "children", "patient", "patients", "participant", "participants", "case", "cases", "例", "名", "名儿童", "名患儿"}:
+        return "person"
+    if unit in {"d", "day", "days", "天", "日"}:
+        return "day"
+    if unit in {"week", "weeks", "周"}:
+        return "week"
+    if unit in {"month", "months", "月"}:
+        return "month"
+    if unit in {"year", "years", "年"}:
+        return "year"
+    if unit in {"h", "hour", "hours"}:
+        return "hour"
+    if unit in {"mg/kg/d", "mg/kg/day", "mg/kg/days"}:
+        return "mg/kg/day"
+    return unit
+
+
+def _unicase(value: object) -> str:
+    return " ".join(str(value or "").casefold().split())
 
 
 def _ungrounded() -> KnowledgeBaseError:

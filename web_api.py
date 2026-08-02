@@ -155,9 +155,33 @@ class GraphRAGWebService:
         confirmation = payload.get("confirm_embedding_cost", False)
         if not isinstance(confirmation, bool):
             raise APIError("invalid_embedding_confirmation", "嵌入费用确认字段无效。")
+        full_confirmation = payload.get("confirm_full_embedding_cost", False)
+        if not isinstance(full_confirmation, bool):
+            raise APIError("invalid_embedding_confirmation", "完整嵌入确认字段无效。")
+        embedding_limit = payload.get("embedding_limit")
+        if confirmation and not full_confirmation and (
+            isinstance(embedding_limit, bool)
+            or not isinstance(embedding_limit, int)
+            or embedding_limit < 1
+            or embedding_limit > 32
+        ):
+            raise APIError(
+                "embedding_probe_limit_required",
+                "首次向量化必须限制为最多 32 条文本。",
+            )
+        if full_confirmation and not confirmation:
+            raise APIError(
+                "invalid_embedding_confirmation",
+                "完整向量化需要同时确认嵌入费用。",
+            )
         options = {
             key: payload[key]
-            for key in ("document_limit", "embedding_limit", "stage")
+            for key in (
+                "document_limit",
+                "embedding_limit",
+                "confirm_full_embedding_cost",
+                "stage",
+            )
             if key in payload
         }
         record = self._call_knowledge(

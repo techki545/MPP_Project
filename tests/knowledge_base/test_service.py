@@ -134,6 +134,16 @@ def test_model_status_never_exposes_api_key(tmp_path: Path) -> None:
     assert "api_key" not in status
 
 
+def test_knowledge_base_is_not_ready_until_local_index_is_complete(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.store.knowledge_base_ready = lambda: False
+
+    assert service.knowledge_base_status()["status"] == "not_built"
+
+    service.store.knowledge_base_ready = lambda: True
+    assert service.knowledge_base_status()["status"] == "ready"
+
+
 def test_production_pipeline_runs_retrieval_claim_graph_and_report_in_order() -> None:
     hit = RankedHit(
         record_id="chunk-1",
@@ -141,7 +151,10 @@ def test_production_pipeline_runs_retrieval_claim_graph_and_report_in_order() ->
         source="vector_fulltext",
         rank=1,
         score=0.9,
-        text="Low dose was supported for fever duration.",
+        text=(
+            "Randomized controlled trial in SMPP children. Low dose "
+            "methylprednisolone with antibiotics was supported for fever duration."
+        ),
         payload={"page_start": 3, "page_end": 3},
     )
     document = RetrievedDocument(
@@ -206,7 +219,7 @@ def test_production_pipeline_runs_retrieval_claim_graph_and_report_in_order() ->
                             "safety_signal": False,
                             "limitations": [],
                             "statement": "Low dose was supported.",
-                            "source_quote": "Low dose was supported for fever duration",
+                        "source_quote": "Low dose methylprednisolone with antibiotics was supported for fever duration",
                         }
                     ]
                 }
@@ -233,3 +246,105 @@ def test_production_pipeline_runs_retrieval_claim_graph_and_report_in_order() ->
     assert result["sources"][0]["chunk_ids"] == ["chunk-1"]
     assert any(node["node_type"] == "claim" for node in result["graph"]["nodes"])
     assert result["retrieval_stats"]["claim_count"] == 1
+
+
+def test_metadata_only_hit_can_supply_a_grounded_graph_claim() -> None:
+    text = "Randomized trial in 40 children. Low dose reduced fever duration."
+    hit = RankedHit(
+        record_id="doc-1",
+        document_id="doc-1",
+        source="fts_metadata",
+        rank=1,
+        score=0.9,
+        text=text,
+        payload={"title": "Randomized trial", "year": 2025},
+    )
+    document = RetrievedDocument(
+        document_id="doc-1",
+        fused_score=1.0,
+        final_score=0.9,
+        supporting_hits=(hit,),
+        payload={"title": "Randomized trial", "year": 2025},
+    )
+    context = QueryContext(
+        raw_question="question",
+        normalized_fts_query="question",
+        population_terms=("children",),
+        intervention_terms=(),
+        comparator_terms=(),
+        outcome_terms=(),
+        safety_focused=False,
+        year_from=None,
+        year_to=None,
+        evidence_types=(),
+        fulltext_only=False,
+    )
+
+    class Retriever:
+        def search(self, question, filters):
+            return RetrievalResult("keyword", "query_embedding_unavailable", (document,), 1, context)
+
+    class Documents:
+        def document_detail(self, document_id):
+            return {
+                "title": "Randomized trial",
+                "abstract": text,
+                "year": 2025,
+                "evidence_type": "randomized_controlled_trial",
+                "classification_confidence": 0.9,
+                "quality": "moderate",
+            }
+
+    class Chat:
+        model = "test-model"
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete_json(self, system_prompt, payload):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "claims": [
+                        {
+                            "source_number": 1,
+                            "source_chunk_ids": ["doc-1"],
+                            "population": "children",
+                            "intervention": "low dose",
+                            "comparator": "",
+                            "design": "randomized trial",
+                            "sample_size": "40",
+                            "dose": "",
+                            "outcome": "fever duration",
+                            "direction": "supports",
+                            "effect_measures": ["reduced fever duration"],
+                            "safety_signal": False,
+                            "limitations": [],
+                            "statement": "Low dose reduced fever duration.",
+                            "source_quote": text,
+                        }
+                    ]
+                }
+            return {
+                "analysis_steps": [
+                    {"title": "Evidence", "body": "One trial.[1]", "source_ids": [1]}
+                ],
+                "final_answer_markdown": "Low dose was supported.[1]",
+            }
+
+    chat = Chat()
+    pipeline = ProductionQueryPipeline(
+        retriever=Retriever(),
+        document_store=Documents(),
+        evidence_refiner=ChatEvidenceRefiner(chat),
+        claim_extractor=GroundedClaimExtractor(chat),
+        graph_builder=LocalGraphBuilder(),
+        reporter=GroundedReporter(chat),
+    )
+
+    result = pipeline.run("question", SearchFilters())
+
+    assert result["sources"][0]["fulltext"] is False
+    assert result["sources"][0]["chunk_ids"] == ["doc-1"]
+    assert result["retrieval_stats"]["claim_count"] == 1
+    assert any(node["node_type"] == "claim" for node in result["graph"]["nodes"])

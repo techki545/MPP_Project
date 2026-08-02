@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from playwright.sync_api import sync_playwright
+import pytest
 
 from tests.web_test_support import running_server
 
 
 class FakeWorkbenchService:
+    def __init__(self, *, probe_completed: bool = False):
+        self.probe_completed = probe_completed
+        self.last_build_payload = None
+
     def health(self):
         return {
             "status": "ok",
@@ -23,6 +28,8 @@ class FakeWorkbenchService:
             "chunks": 7699,
             "embedded": 1,
             "errors": 0,
+            "embedding_probe_completed": self.probe_completed,
+            "embedding_pending": 128,
         }
 
     def model_status(self):
@@ -135,18 +142,29 @@ class FakeWorkbenchService:
             "quality": "high",
             "has_fulltext": True,
             "fulltext_status": "parsed",
-            "matched_snippets": [
+            "document_snippets": [
                 {
                     "chunk_id": "chunk-1",
-                    "text": "Low dose result",
-                    "section": "Results",
-                    "page_start": 3,
-                    "page_end": 3,
+                    "text": "Introduction text that was not hit by this query",
+                    "section": "Introduction",
+                    "page_start": 1,
+                    "page_end": 1,
                     "quality": "high",
                     "is_ocr": False,
                 }
             ],
             "pdf_available": True,
+        }
+
+    def start_build(self, payload):
+        self.last_build_payload = dict(payload)
+        return {"job_id": "job-1", "state": "queued", "progress": {}}
+
+    def job_status(self, job_id):
+        return {
+            "job_id": job_id,
+            "state": "embedding_pending",
+            "progress": {"pending_embedding_count": 128},
         }
 
 
@@ -166,8 +184,9 @@ def test_workbench_has_no_browser_api_key_and_renders_grounded_sources() -> None
         assert page.locator("#evidence-graph [data-node-id]").count() == 2
 
         page.locator("[data-source-number='1']").first.click()
-        page.get_by_text("命中的正文片段").wait_for()
+        page.get_by_text("本次查询命中片段").wait_for()
         page.get_by_text("Low dose result").wait_for()
+        assert page.get_by_text("Introduction text that was not hit by this query").count() == 0
         assert page.get_by_role("link", name="在浏览器中查看 PDF").is_visible()
         browser.close()
 
@@ -184,4 +203,35 @@ def test_mobile_layout_has_no_horizontal_overflow_and_keeps_primary_action_visib
         )
         assert overflow is False
         assert page.locator("#api-key").count() == 0
+        browser.close()
+
+
+@pytest.mark.parametrize(
+    ("probe_completed", "expected"),
+    [
+        (False, {"confirm_embedding_cost": True, "embedding_limit": 32}),
+        (
+            True,
+            {
+                "confirm_embedding_cost": True,
+                "confirm_full_embedding_cost": True,
+            },
+        ),
+    ],
+)
+def test_embedding_continue_uses_two_distinct_confirmations(
+    probe_completed: bool, expected: dict
+) -> None:
+    service = FakeWorkbenchService(probe_completed=probe_completed)
+    with running_server(service) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.on("dialog", lambda dialog: dialog.accept())
+        page.goto(base_url)
+        page.get_by_text("35,408").wait_for()
+
+        page.locator("#continue-kb").click()
+        page.locator("#job-state").get_by_text("本地索引完成，等待向量化").wait_for()
+
+        assert service.last_build_payload == expected
         browser.close()

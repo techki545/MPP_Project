@@ -133,12 +133,8 @@ function cacheDom() {
 function bindEvents() {
   dom.question.addEventListener("input", updateQuestionCount);
   dom.runQuery.addEventListener("click", runQuery);
-  dom.buildKb.addEventListener("click", () => startBuild(false));
-  dom.continueKb.addEventListener("click", () => {
-    if (window.confirm("继续向量化将调用服务器配置的嵌入模型，是否确认？")) {
-      startBuild(true);
-    }
-  });
+  dom.buildKb.addEventListener("click", () => startBuild());
+  dom.continueKb.addEventListener("click", continueEmbedding);
   dom.pauseKb.addEventListener("click", pauseBuild);
   dom.retryKb.addEventListener("click", retryBuild);
   dom.sourceList.addEventListener("click", handleSourceClick);
@@ -455,7 +451,7 @@ async function selectSource(sourceNumber) {
   renderSourceLoading(source);
   try {
     const detail = await fetchJson(`/api/documents/${encodeURIComponent(source.document_id)}`);
-    renderSourceDetail(detail, sourceNumber);
+    renderSourceDetail(detail, source);
     dom.sourceDetail.scrollIntoView({ behavior: "smooth", block: "nearest" });
   } catch (error) {
     renderSourceError(source, error.message);
@@ -470,11 +466,11 @@ function renderSourceLoading(source) {
   dom.sourceDetail.append(heading, emptyState("正在加载文献详情…"));
 }
 
-function renderSourceDetail(detail, sourceNumber) {
+function renderSourceDetail(detail, source) {
   dom.sourceDetail.replaceChildren();
   const heading = document.createElement("h3");
   heading.id = "source-detail-title";
-  heading.textContent = detail.title || `来源 ${sourceNumber}`;
+  heading.textContent = detail.title || source.title || `来源 ${source.source_number}`;
   const bibliography = document.createElement("dl");
   bibliography.className = "bibliography";
   addBibliographyRow(bibliography, "作者", formatAuthors(detail.authors));
@@ -497,12 +493,12 @@ function renderSourceDetail(detail, sourceNumber) {
 
   const snippetHeading = document.createElement("h4");
   snippetHeading.className = "snippet-heading";
-  snippetHeading.textContent = "命中的正文片段";
+  snippetHeading.textContent = "本次查询命中片段";
   const snippetList = document.createElement("div");
   snippetList.className = "snippet-list";
-  const snippets = Array.isArray(detail.matched_snippets) ? detail.matched_snippets : [];
+  const snippets = querySourceSnippets(source);
   if (!snippets.length) {
-    snippetList.append(emptyState("该文献当前没有可展示的全文片段。"));
+    snippetList.append(emptyState("本次查询没有可展示的来源片段。"));
   } else {
     snippets.forEach((snippet) => {
       const item = document.createElement("article");
@@ -526,6 +522,31 @@ function renderSourceDetail(detail, sourceNumber) {
     link.textContent = "在浏览器中查看 PDF";
     dom.sourceDetail.append(link);
   }
+}
+
+function querySourceSnippets(source) {
+  const texts = Array.isArray(source.snippets) ? source.snippets : [];
+  const ranges = Array.isArray(source.page_ranges) ? source.page_ranges : [];
+  const chunkIds = Array.isArray(source.chunk_ids) ? source.chunk_ids : [];
+  return texts
+    .filter((text) => typeof text === "string" && text.trim())
+    .map((text, index) => {
+      const [pageStart, pageEnd] = parsePageRange(ranges[index]);
+      return {
+        chunk_id: chunkIds[index] || "",
+        text,
+        section: source.fulltext ? "全文命中" : "题录或摘要命中",
+        page_start: pageStart,
+        page_end: pageEnd,
+        is_ocr: false,
+      };
+    });
+}
+
+function parsePageRange(value) {
+  const match = String(value || "").match(/^(\d+)(?:-(\d+))?$/);
+  if (!match) return [null, null];
+  return [Number(match[1]), Number(match[2] || match[1])];
 }
 
 function renderSourceError(source, message) {
@@ -690,16 +711,40 @@ function svgElement(name) {
   return document.createElementNS("http://www.w3.org/2000/svg", name);
 }
 
-async function startBuild(confirmEmbeddingCost) {
+async function continueEmbedding() {
+  const probeCompleted = Boolean(state.kbStatus?.embedding_probe_completed);
+  const pending = Number(state.kbStatus?.embedding_pending || 0);
+  if (!probeCompleted) {
+    if (!window.confirm("先调用嵌入模型试运行最多 32 条文本，是否确认？")) return;
+    await startBuild({ confirmEmbeddingCost: true, embeddingLimit: 32 });
+    return;
+  }
+  const countLabel = pending > 0 ? `剩余约 ${pending.toLocaleString("zh-CN")} 条文本，` : "";
+  if (!window.confirm(`${countLabel}将执行完整向量化，是否再次确认？`)) return;
+  await startBuild({ confirmEmbeddingCost: true, confirmFullEmbeddingCost: true });
+}
+
+async function startBuild({
+  confirmEmbeddingCost = false,
+  confirmFullEmbeddingCost = false,
+  embeddingLimit = null,
+  stage = null,
+} = {}) {
   setJobControls(true);
   try {
+    const payload = {
+      confirm_embedding_cost: confirmEmbeddingCost,
+      ...(confirmFullEmbeddingCost ? { confirm_full_embedding_cost: true } : {}),
+      ...(embeddingLimit ? { embedding_limit: embeddingLimit } : {}),
+      ...(stage ? { stage } : {}),
+    };
     const job = await fetchJson("/api/kb/build", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ confirm_embedding_cost: confirmEmbeddingCost }),
+      body: JSON.stringify(payload),
     });
     beginJobPolling(job);
-    showToast(confirmEmbeddingCost ? "已开始本地构建与向量化。" : "已开始免费本地构建阶段。");
+    showToast(confirmEmbeddingCost ? "已提交向量化任务。" : "已开始免费本地构建阶段。");
   } catch (error) {
     setJobControls(false);
     showToast(error.message);
@@ -723,14 +768,26 @@ async function pauseBuild() {
 async function retryBuild() {
   const stage = dom.retryStage.value;
   const paidStage = stage === "embedding" || stage === "vector";
-  const confirmed = !paidStage || window.confirm("重试该阶段可能调用嵌入模型，是否确认？");
-  if (!confirmed) return;
+  if (paidStage) {
+    const probeCompleted = Boolean(state.kbStatus?.embedding_probe_completed);
+    const message = probeCompleted
+      ? "该重试将继续完整向量化，是否再次确认？"
+      : "该重试先试运行最多 32 条嵌入，是否确认？";
+    if (!window.confirm(message)) return;
+    await startBuild({
+      confirmEmbeddingCost: true,
+      confirmFullEmbeddingCost: probeCompleted,
+      embeddingLimit: probeCompleted ? null : 32,
+      stage,
+    });
+    return;
+  }
   setJobControls(true);
   try {
     const job = await fetchJson("/api/kb/retry", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stage, confirm_embedding_cost: paidStage }),
+      body: JSON.stringify({ stage, confirm_embedding_cost: false }),
     });
     beginJobPolling(job);
   } catch (error) {
@@ -751,7 +808,7 @@ async function pollJob() {
   try {
     const job = await fetchJson(`/api/jobs/${encodeURIComponent(state.currentJobId)}`);
     renderJob(job);
-    if (["paused", "completed", "failed"].includes(job.state)) {
+    if (["paused", "completed", "completed_with_errors", "embedding_pending", "failed"].includes(job.state)) {
       state.currentJobId = null;
       setJobControls(false);
       await refreshKbStatus();
@@ -771,9 +828,15 @@ function renderJob(job) {
   const stage = progress.stage || progress.current_stage || "";
   dom.jobStage.textContent = stage ? STAGE_LABELS[stage] || stage : jobStateLabel(job.state);
   dom.jobState.textContent = jobStateLabel(job.state);
-  const terminal = ["paused", "completed", "failed"].includes(job.state);
+  const terminal = ["paused", "completed", "completed_with_errors", "embedding_pending", "failed"].includes(job.state);
   if (terminal) {
-    dom.jobProgress.value = job.state === "completed" ? 100 : 0;
+    if (["completed", "completed_with_errors"].includes(job.state)) {
+      dom.jobProgress.value = 100;
+    } else if (job.state === "embedding_pending") {
+      dom.jobProgress.removeAttribute("value");
+    } else {
+      dom.jobProgress.value = 0;
+    }
   } else {
     dom.jobProgress.removeAttribute("value");
   }
@@ -787,6 +850,8 @@ function jobStateLabel(value) {
     pausing: "正在安全暂停",
     paused: "已暂停",
     completed: "已完成",
+    completed_with_errors: "完成，存在失败记录",
+    embedding_pending: "本地索引完成，等待向量化",
     failed: "构建失败",
   }[value] || "空闲";
 }

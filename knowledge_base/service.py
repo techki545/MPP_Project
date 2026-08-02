@@ -13,7 +13,12 @@ from .embedding_client import EmbeddingClient
 from .errors import KnowledgeBaseError
 from .evidence_classifier import EvidenceAssessment, classify_evidence
 from .graph_builder import LocalGraphBuilder
-from .indexer import BuildPipeline, Indexer, build_default_pipeline
+from .indexer import (
+    BuildPipeline,
+    Indexer,
+    build_default_pipeline,
+    validate_embedding_cost_gate,
+)
 from .models import SearchFilters
 from .reporter import (
     ChatEvidenceRefiner,
@@ -150,7 +155,26 @@ class KnowledgeBaseService:
     def knowledge_base_status(self) -> dict[str, Any]:
         statistics = getattr(self.store, "statistics", None)
         counts = dict(statistics()) if callable(statistics) else {}
-        counts["status"] = "ready" if counts.get("metadata_records", 0) else "not_built"
+        readiness = getattr(self.store, "knowledge_base_ready", None)
+        ready = (
+            bool(readiness())
+            if callable(readiness)
+            else bool(counts.get("metadata_records", 0))
+        )
+        probe_status = getattr(self.store, "embedding_probe_completed", None)
+        if callable(probe_status):
+            counts["embedding_probe_completed"] = bool(
+                probe_status(self.settings.embedding_model)
+            )
+        build_status = getattr(self.store, "build_status", None)
+        if callable(build_status):
+            job = build_status()
+            progress = dict(job.get("progress", {})) if job else {}
+            counts["build_state"] = str(job.get("state", "idle")) if job else "idle"
+            counts["embedding_pending"] = int(
+                progress.get("pending_embedding_count", 0) or 0
+            )
+        counts["status"] = "ready" if ready else "not_built"
         return counts
 
     def health(self) -> dict[str, Any]:
@@ -182,6 +206,15 @@ class SQLiteDocumentStore:
     def statistics(self) -> dict[str, int]:
         return self.store.statistics()
 
+    def knowledge_base_ready(self) -> bool:
+        return self.store.local_index_ready()
+
+    def embedding_probe_completed(self, model_name: str) -> bool:
+        return self.store.embedding_probe_completed(model_name)
+
+    def build_status(self) -> dict[str, Any] | None:
+        return self.store.get_job(Indexer.JOB_ID)
+
     def document_detail(self, document_id: str) -> dict[str, Any] | None:
         document = self.store.get_document(document_id)
         if document is None:
@@ -208,7 +241,7 @@ class SQLiteDocumentStore:
             "quality": quality,
             "has_fulltext": document.has_fulltext,
             "fulltext_status": document.fulltext_status,
-            "matched_snippets": [
+            "document_snippets": [
                 {
                     "chunk_id": chunk.chunk_id,
                     "text": chunk.text,
@@ -317,7 +350,7 @@ class ProductionQueryPipeline:
             hit for hit in item.supporting_hits if "fulltext" in hit.source
         ]
         selected_hits = fulltext_hits or list(item.supporting_hits[:1])
-        chunk_ids = tuple(hit.record_id for hit in fulltext_hits)
+        chunk_ids = tuple(hit.record_id for hit in selected_hits)
         snippets = tuple(hit.text for hit in selected_hits if hit.text.strip())
         page_ranges = tuple(
             _page_range(hit.payload.get("page_start"), hit.payload.get("page_end"))
@@ -408,10 +441,18 @@ class ProductionBuildRunner:
         confirm_embedding_cost: bool,
         document_limit: int | None = None,
         embedding_limit: int | None = None,
+        confirm_full_embedding_cost: bool = False,
         stage: str | None = None,
     ) -> Any:
         embedding_client: EmbeddingClient | None = None
         vector_store: LocalVectorStore | None = None
+        validate_embedding_cost_gate(
+            self.store,
+            model_name=self.settings.embedding_model,
+            confirm_embedding_cost=confirm_embedding_cost,
+            confirm_full_embedding_cost=confirm_full_embedding_cost,
+            embedding_limit=embedding_limit,
+        )
         if confirm_embedding_cost:
             self.settings.require_embedding_access()
             embedding_client = EmbeddingClient(
@@ -447,13 +488,24 @@ class ProductionBuildRunner:
                         stages={stage: pipeline.stages[stage]},
                         algorithm_version=pipeline.algorithm_version,
                     )
-            return indexer.build(
+            result = indexer.build(
                 pipeline,
                 document_limit=document_limit,
                 embedding_limit=embedding_limit,
                 confirm_embedding_cost=confirm_embedding_cost,
                 should_pause=should_pause,
             )
+            if (
+                confirm_embedding_cost
+                and not confirm_full_embedding_cost
+                and embedding_limit is not None
+                and result.stage_counters.get("embedding", {}).get("processed", 0) > 0
+                and result.stage_counters.get("embedding", {}).get("failed", 0) == 0
+            ):
+                self.store.mark_embedding_probe_completed(
+                    self.settings.embedding_model
+                )
+            return result
         finally:
             if vector_store is not None:
                 vector_store.close()
