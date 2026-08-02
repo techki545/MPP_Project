@@ -1,10 +1,15 @@
+import ast
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+import sqlite3
+import struct
+import zlib
 
 import pytest
 
 from knowledge_base.errors import KnowledgeBaseError
 from knowledge_base.models import ChunkRecord, DocumentRecord, FileRecord, SearchFilters
+import knowledge_base.sqlite_store as sqlite_store_module
 from knowledge_base.sqlite_store import SQLiteStore
 
 
@@ -115,6 +120,54 @@ def test_embedding_cache_round_trip_is_model_scoped(store: SQLiteStore):
     assert store.get_cached_embedding("content-hash", "model-b") is None
 
 
+def test_embedding_cache_uses_little_endian_float32(store: SQLiteStore):
+    vector = [0.25, -1.5]
+    store.put_cached_embedding("content-hash", "model-a", vector)
+
+    with sqlite3.connect(store.path) as connection:
+        blob = connection.execute(
+            """
+            SELECT vector_blob FROM embedding_cache
+            WHERE content_hash = ? AND model_name = ?
+            """,
+            ("content-hash", "model-a"),
+        ).fetchone()[0]
+
+    assert zlib.decompress(blob) == struct.pack("<2f", *vector)
+
+
+@pytest.mark.parametrize(
+    ("content_hash", "dimension", "blob"),
+    [
+        ("invalid-zlib", 1, b"not-zlib"),
+        ("invalid-byte-length", 1, zlib.compress(b"\x00\x00\x00")),
+        ("mismatched-dimension", 1, zlib.compress(struct.pack("<2f", 1.0, 2.0))),
+    ],
+)
+def test_corrupt_embedding_cache_raises_stable_error(
+    store: SQLiteStore, content_hash: str, dimension: int, blob: bytes
+):
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            """
+            INSERT INTO embedding_cache(content_hash, model_name, dimension, vector_blob)
+            VALUES (?, ?, ?, ?)
+            """,
+            (content_hash, "model-a", dimension, blob),
+        )
+
+    with pytest.raises(KnowledgeBaseError) as exc_info:
+        store.get_cached_embedding(content_hash, "model-a")
+
+    assert exc_info.value.code == "embedding_cache_corrupt"
+
+
+def test_sqlite_store_source_is_python_310_compatible():
+    source = Path(sqlite_store_module.__file__).read_text(encoding="utf-8")
+
+    ast.parse(source, feature_version=(3, 10))
+
+
 def test_pending_embedding_items_are_scoped_to_model(
     store: SQLiteStore,
     document: DocumentRecord,
@@ -131,7 +184,9 @@ def test_pending_embedding_items_are_scoped_to_model(
     assert all(item.content_hash for item in pending)
 
     for item in pending:
-        store.mark_embedding_indexed(item.record_id, item.kind, "model-a")
+        assert store.mark_embedding_indexed(
+            item.record_id, item.kind, "model-a", item.content_hash
+        )
 
     assert store.list_pending_embedding_items("model-a") == []
     assert {(item.record_id, item.kind) for item in store.list_pending_embedding_items("model-b")} == {
@@ -152,7 +207,9 @@ def test_changed_metadata_becomes_pending_after_being_indexed(
         for item in store.list_pending_embedding_items("model-a")
         if item.record_id == "doc-1"
     )
-    store.mark_embedding_indexed("doc-1", "metadata", "model-a")
+    assert store.mark_embedding_indexed(
+        "doc-1", "metadata", "model-a", original_item.content_hash
+    )
 
     updated_document = replace(document, abstract="更新后的甲泼尼龙剂量比较。")
     store.upsert_document(updated_document)
@@ -170,7 +227,14 @@ def test_changed_chunk_becomes_pending_after_being_indexed(
     chunk: ChunkRecord,
 ):
     insert_document_graph(store, document, file_record, chunk)
-    store.mark_embedding_indexed("chunk-1", "chunk", "model-a")
+    original_item = next(
+        item
+        for item in store.list_pending_embedding_items("model-a")
+        if item.record_id == "chunk-1"
+    )
+    assert store.mark_embedding_indexed(
+        "chunk-1", "chunk", "model-a", original_item.content_hash
+    )
 
     updated_chunk = replace(
         chunk,
@@ -183,6 +247,89 @@ def test_changed_chunk_becomes_pending_after_being_indexed(
     chunk_item = next(item for item in pending if item.record_id == "chunk-1")
     assert chunk_item.kind == "chunk"
     assert chunk_item.content_hash == "updated-chunk-content-hash"
+
+
+def test_stale_metadata_item_is_not_marked_current(
+    store: SQLiteStore,
+    document: DocumentRecord,
+    file_record: FileRecord,
+    chunk: ChunkRecord,
+):
+    insert_document_graph(store, document, file_record, chunk)
+    item = next(
+        item
+        for item in store.list_pending_embedding_items("model-a")
+        if item.record_id == "doc-1"
+    )
+    store.upsert_document(replace(document, abstract="更新后的元数据内容。"))
+
+    assert not store.mark_embedding_indexed(
+        item.record_id, item.kind, "model-a", item.content_hash
+    )
+    assert any(
+        pending.record_id == "doc-1"
+        for pending in store.list_pending_embedding_items("model-a")
+    )
+
+
+def test_stale_chunk_item_is_not_marked_current(
+    store: SQLiteStore,
+    document: DocumentRecord,
+    file_record: FileRecord,
+    chunk: ChunkRecord,
+):
+    insert_document_graph(store, document, file_record, chunk)
+    item = next(
+        item
+        for item in store.list_pending_embedding_items("model-a")
+        if item.record_id == "chunk-1"
+    )
+    store.upsert_chunk(
+        replace(
+            chunk,
+            text="更新后的正文内容。",
+            content_hash="stale-chunk-content-hash",
+        )
+    )
+
+    assert not store.mark_embedding_indexed(
+        item.record_id, item.kind, "model-a", item.content_hash
+    )
+    assert any(
+        pending.record_id == "chunk-1"
+        for pending in store.list_pending_embedding_items("model-a")
+    )
+
+
+def test_document_fts_replaces_stale_terms_on_upsert(
+    store: SQLiteStore,
+    document: DocumentRecord,
+):
+    store.upsert_document(replace(document, title="legacymetadata", abstract=""))
+    store.upsert_document(replace(document, title="freshmetadata", abstract=""))
+
+    assert store.search_metadata("legacymetadata", 5) == []
+    assert [hit.record_id for hit in store.search_metadata("freshmetadata", 5)] == ["doc-1"]
+
+
+def test_chunk_fts_replaces_stale_terms_on_upsert(
+    store: SQLiteStore,
+    document: DocumentRecord,
+    file_record: FileRecord,
+    chunk: ChunkRecord,
+):
+    insert_document_graph(
+        store,
+        document,
+        file_record,
+        replace(chunk, text="legacychunk", content_hash="original-hash"),
+    )
+    store.upsert_chunk(
+        replace(chunk, text="freshchunk", content_hash="replacement-hash")
+    )
+
+    assert store.search_fulltext("legacychunk", 5) == []
+    assert [hit.record_id for hit in store.search_fulltext("freshchunk", 5)] == ["chunk-1"]
 
 
 def test_job_progress_and_error_records_round_trip(store: SQLiteStore):
@@ -241,3 +388,9 @@ def test_search_filters_apply_to_metadata(
     assert [hit.record_id for hit in store.search_metadata("低剂量", 5, SearchFilters(fulltext_only=True))] == [
         "doc-1"
     ]
+    assert store.search_fulltext(
+        "低剂量", 5, SearchFilters(evidence_types=frozenset({"systematic_review"}))
+    ) == []
+    assert store.search_fulltext("低剂量", 5, SearchFilters(year_to=2023)) == []
+    store.upsert_document(replace(document, has_fulltext=False))
+    assert store.search_metadata("低剂量", 5, SearchFilters(fulltext_only=True)) == []

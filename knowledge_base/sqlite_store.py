@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from array import array
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from hashlib import sha256
@@ -8,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+import struct
 from typing import Any
 import zlib
 
@@ -378,7 +378,9 @@ class SQLiteStore:
             )
         return items if limit is None else items[:limit]
 
-    def mark_embedding_indexed(self, record_id: str, kind: str, model_name: str) -> None:
+    def mark_embedding_indexed(
+        self, record_id: str, kind: str, model_name: str, expected_content_hash: str
+    ) -> bool:
         with self._connection() as connection:
             if kind == "metadata":
                 row = connection.execute(
@@ -405,6 +407,8 @@ class SQLiteStore:
                 raise KnowledgeBaseError(
                     "invalid_embedding_kind", "Embedding kind must be metadata or chunk"
                 )
+            if content_hash != expected_content_hash:
+                return False
             connection.execute(
                 """
                 INSERT INTO embedding_index_state(record_id, kind, model_name, content_hash)
@@ -414,6 +418,7 @@ class SQLiteStore:
                 """,
                 (record_id, kind, model_name, content_hash),
             )
+        return True
 
     def set_job_state(self, job_id: str, state: str, progress: dict[str, Any]) -> None:
         with self._connection() as connection:
@@ -486,22 +491,22 @@ class SQLiteStore:
 
         try:
             raw_vector = zlib.decompress(row["vector_blob"])
-            vector = array("f")
-            vector.frombytes(raw_vector)
-        except (ValueError, zlib.error) as exc:
+            if len(raw_vector) % 4 != 0:
+                raise ValueError("Cached embedding byte length is invalid")
+            if len(raw_vector) // 4 != row["dimension"]:
+                raise ValueError("Cached embedding dimension does not match")
+            vector = struct.unpack(f"<{row['dimension']}f", raw_vector)
+        except (ValueError, struct.error, zlib.error) as exc:
             raise KnowledgeBaseError(
                 "embedding_cache_corrupt", "Cached embedding could not be decoded"
             ) from exc
-        if len(vector) != row["dimension"]:
-            raise KnowledgeBaseError(
-                "embedding_cache_corrupt", "Cached embedding dimension does not match"
-            )
         return list(vector)
 
     def put_cached_embedding(
         self, content_hash: str, model_name: str, vector: Sequence[float]
     ) -> None:
-        values = array("f", (float(value) for value in vector))
+        values = tuple(float(value) for value in vector)
+        vector_bytes = struct.pack(f"<{len(values)}f", *values)
         with self._connection() as connection:
             connection.execute(
                 """
@@ -515,7 +520,7 @@ class SQLiteStore:
                     content_hash,
                     model_name,
                     len(values),
-                    zlib.compress(values.tobytes()),
+                    zlib.compress(vector_bytes),
                 ),
             )
 
@@ -610,7 +615,11 @@ class SQLiteStore:
 
     def _fts_query(self, query: str) -> str:
         terms = self._tokenizer(query).split()
-        return " OR ".join(f'"{term.replace('"', '""')}"' for term in terms)
+        return " OR ".join(self._quote_fts_term(term) for term in terms)
+
+    @staticmethod
+    def _quote_fts_term(term: str) -> str:
+        return '"' + term.replace('"', '""') + '"'
 
     @staticmethod
     def _metadata_text(title: str, abstract: str) -> str:
