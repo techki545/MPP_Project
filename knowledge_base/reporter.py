@@ -10,7 +10,7 @@ from typing import Any
 
 from .errors import KnowledgeBaseError
 from .evidence_classifier import EvidenceAssessment
-from .graph_builder import EvidenceClaim
+from .graph_builder import CLINICAL_ASPECTS, EVIDENCE_ROLES, EvidenceClaim
 
 
 _EVIDENCE_TYPES = {
@@ -99,10 +99,13 @@ an individual clinician's judgment.
 _CLAIM_EXTRACTION_PROMPT = """
 Extract only source-grounded clinical claims from the numbered evidence snippets.
 Return JSON with a claims array containing at most one claim per supplied source.
-Every claim must include source_number,
-source_chunk_ids, source_quote_id, population, intervention, comparator, design, sample_size, dose,
-outcome, direction (supports, opposes, or uncertain), effect_measures,
-safety_signal, limitations, and statement. Select exactly one supplied quote_options
+Every claim must include source_number, source_chunk_ids, source_quote_id,
+clinical_aspect, direction, evidence_role, population, intervention, comparator,
+design, sample_size, dose, outcome, effect_measures, safety_signal, limitations,
+and statement. clinical_aspect must be one of overall, effectiveness, dose, timing,
+safety, diagnosis, prognosis, applicability, or other. direction must be supports,
+opposes, or uncertain relative to the user's proposition. evidence_role must be
+core, supplement, or boundary. Select exactly one supplied quote_options
 item and copy its quote_id into source_quote_id and its source_chunk_id into
 source_chunk_ids. Do not return or rewrite the quote text; the server resolves it by
 ID. effect_measures and limitations must always be JSON arrays of strings; use []
@@ -379,6 +382,13 @@ class GroundedClaimExtractor:
             cutoff = raw_claim.get("evidence_cutoff_year")
             if isinstance(cutoff, bool) or not isinstance(cutoff, (int, type(None))):
                 cutoff = None
+            direction = _closed_label(raw_claim.get("direction"), _DIRECTIONS, "uncertain")
+            clinical_aspect = _closed_label(
+                raw_claim.get("clinical_aspect"), CLINICAL_ASPECTS, "other"
+            )
+            evidence_role = _closed_label(
+                raw_claim.get("evidence_role"), EVIDENCE_ROLES, "supplement"
+            )
             return (
                 EvidenceClaim(
                     claim_id=f"claim-{source_number}-{index}",
@@ -390,7 +400,7 @@ class GroundedClaimExtractor:
                     intervention="",
                     comparator="",
                     outcome="",
-                    direction="uncertain",
+                    direction=direction,
                     safety_signal=_quoted_safety_signal(source_quote) is True,
                     design="",
                     dose="",
@@ -401,6 +411,8 @@ class GroundedClaimExtractor:
                     source_quote=source_quote,
                     source_chunk_ids=chunk_ids,
                     follow_up="",
+                    clinical_aspect=clinical_aspect,
+                    evidence_role=evidence_role,
                 ),
                 "",
             )
@@ -464,6 +476,12 @@ class GroundedClaimExtractor:
                 source_quote=source_quote,
                 source_chunk_ids=chunk_ids,
                 follow_up=_optional_text(raw_claim.get("follow_up")),
+                clinical_aspect=_closed_label(
+                    raw_claim.get("clinical_aspect"), CLINICAL_ASPECTS, "other"
+                ),
+                evidence_role=_closed_label(
+                    raw_claim.get("evidence_role"), EVIDENCE_ROLES, "supplement"
+                ),
             ),
             "",
         )
@@ -781,6 +799,11 @@ def _string_tuple(value: object, *, allow_empty: bool = False) -> tuple[str, ...
 
 def _optional_text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def _closed_label(value: object, allowed: frozenset[str] | set[str], default: str) -> str:
+    normalized = value.strip().casefold() if isinstance(value, str) else ""
+    return normalized if normalized in allowed else default
 
 
 def _optional_scalar(value: object) -> str:

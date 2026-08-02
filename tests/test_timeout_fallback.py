@@ -283,7 +283,7 @@ def test_claim_extractor_resolves_quote_id_to_exact_source_text() -> None:
     }
 
 
-def test_quote_id_claim_ignores_model_invented_descriptors_and_direction() -> None:
+def test_quote_id_claim_keeps_only_closed_reasoning_labels() -> None:
     bundle = _large_bundle(source_count=1)
     client = _PayloadCaptureClient(
         {
@@ -291,6 +291,8 @@ def test_quote_id_claim_ignores_model_invented_descriptors_and_direction() -> No
                 {
                     "source_number": 1,
                     "source_quote_id": "quote-1-1",
+                    "clinical_aspect": "effectiveness",
+                    "evidence_role": "core",
                     "population": "invented adult population",
                     "intervention": "invented treatment",
                     "comparator": "invented placebo",
@@ -313,13 +315,40 @@ def test_quote_id_claim_ignores_model_invented_descriptors_and_direction() -> No
     assert len(validated.claims) == 1
     claim = validated.claims[0]
     assert claim.statement == "Grounded evidence sentence 1"
-    assert claim.direction == "uncertain"
+    assert claim.clinical_aspect == "effectiveness"
+    assert claim.direction == "supports"
+    assert claim.evidence_role == "core"
     assert claim.population == ""
     assert claim.intervention == ""
     assert claim.dose == ""
     assert claim.effect_measures == ()
     assert claim.limitations == ()
     assert claim.safety_signal is False
+
+
+def test_quote_id_claim_downgrades_unknown_reasoning_labels() -> None:
+    bundle = _large_bundle(source_count=1)
+    client = _PayloadCaptureClient(
+        {
+            "claims": [
+                {
+                    "source_number": 1,
+                    "source_quote_id": "quote-1-1",
+                    "clinical_aspect": "invented aspect",
+                    "direction": "strongly proves",
+                    "evidence_role": "definitive",
+                }
+            ]
+        }
+    )
+
+    validated = GroundedClaimExtractor(client).extract("Clinical question", bundle)
+
+    assert len(validated.claims) == 1
+    claim = validated.claims[0]
+    assert claim.clinical_aspect == "other"
+    assert claim.direction == "uncertain"
+    assert claim.evidence_role == "supplement"
 
 
 def test_partial_model_claims_are_completed_with_extractive_claims() -> None:

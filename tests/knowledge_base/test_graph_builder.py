@@ -17,6 +17,8 @@ def claim(
     dose: str = "",
     population: str = "SMPP children",
     intervention: str = "methylprednisolone",
+    clinical_aspect: str = "effectiveness",
+    evidence_role: str = "core",
 ) -> EvidenceClaim:
     return EvidenceClaim(
         claim_id=identifier,
@@ -34,6 +36,8 @@ def claim(
         statement="source-grounded statement",
         source_chunk_ids=(f"chunk-{identifier}",),
         source_quote="verbatim source excerpt",
+        clinical_aspect=clinical_aspect,
+        evidence_role=evidence_role,
     )
 
 
@@ -140,8 +144,152 @@ def test_graph_json_uses_only_allowed_relations_and_has_traceability() -> None:
     }
     assert all(
         edge["relation"]
-        in {"supports", "updates", "supplements", "conflicts", "cautions"}
+        in {
+            "supports",
+            "updates",
+            "supplements",
+            "confirms",
+            "conflicts",
+            "cautions",
+        }
         for edge in payload["edges"]
     )
     assert all(edge["source_claim_ids"] and edge["rationale"] for edge in payload["edges"])
-    assert "confirms" not in str(payload)
+    assert "confirms" in str(payload)
+
+
+@pytest.mark.parametrize(
+    (
+        "source_type",
+        "target_type",
+        "source_year",
+        "target_year",
+        "source_direction",
+        "target_direction",
+        "aspect",
+        "expected",
+    ),
+    [
+        (
+            "systematic_review",
+            "guideline",
+            2022,
+            2023,
+            "supports",
+            "supports",
+            "overall",
+            "supports",
+        ),
+        (
+            "randomized_controlled_trial",
+            "systematic_review",
+            2025,
+            2020,
+            "supports",
+            "supports",
+            "dose",
+            "confirms",
+        ),
+        (
+            "randomized_controlled_trial",
+            "guideline",
+            2025,
+            2023,
+            "supports",
+            "supports",
+            "dose",
+            "updates",
+        ),
+        (
+            "observational_study",
+            "systematic_review",
+            2024,
+            2022,
+            "supports",
+            "supports",
+            "applicability",
+            "supplements",
+        ),
+        (
+            "randomized_controlled_trial",
+            "systematic_review",
+            2025,
+            2024,
+            "opposes",
+            "supports",
+            "effectiveness",
+            "conflicts",
+        ),
+        (
+            "case_report",
+            "guideline",
+            2025,
+            2023,
+            "uncertain",
+            "supports",
+            "safety",
+            "cautions",
+        ),
+    ],
+)
+def test_first_demo_relation_vocabulary(
+    source_type: str,
+    target_type: str,
+    source_year: int,
+    target_year: int,
+    source_direction: str,
+    target_direction: str,
+    aspect: str,
+    expected: str,
+) -> None:
+    source = claim(
+        "source",
+        source_type,
+        source_year,
+        source_direction,
+        aspect,
+        safety=expected == "cautions",
+        clinical_aspect=aspect,
+        evidence_role="boundary" if expected == "cautions" else "core",
+    )
+    target = claim(
+        "target",
+        target_type,
+        target_year,
+        target_direction,
+        aspect,
+        clinical_aspect=aspect,
+        evidence_role="core",
+    )
+
+    graph = LocalGraphBuilder().build("question", [source, target])
+
+    assert any(
+        edge.source == "source"
+        and edge.target == "target"
+        and edge.relation == expected
+        for edge in graph.edges
+    )
+
+
+def test_newer_study_with_different_clinical_aspect_cannot_update_guideline() -> None:
+    guideline = claim(
+        "guide",
+        "guideline",
+        2023,
+        "supports",
+        "overall treatment",
+        clinical_aspect="overall",
+    )
+    rct = claim(
+        "trial",
+        "randomized_controlled_trial",
+        2025,
+        "supports",
+        "dose response",
+        clinical_aspect="dose",
+    )
+
+    graph = LocalGraphBuilder().build("question", [guideline, rct])
+
+    assert not any(edge.relation == "updates" for edge in graph.edges)

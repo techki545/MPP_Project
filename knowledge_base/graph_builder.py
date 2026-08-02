@@ -11,10 +11,39 @@ from typing import Any, Iterable
 
 
 ALLOWED_RELATIONS = frozenset(
-    {"supports", "updates", "supplements", "conflicts", "cautions"}
+    {"supports", "updates", "supplements", "confirms", "conflicts", "cautions"}
 )
+CLINICAL_ASPECTS = frozenset(
+    {
+        "overall",
+        "effectiveness",
+        "dose",
+        "timing",
+        "safety",
+        "diagnosis",
+        "prognosis",
+        "applicability",
+        "other",
+    }
+)
+EVIDENCE_ROLES = frozenset({"core", "supplement", "boundary"})
 _STUDY_UPDATE_TYPES = {"randomized_controlled_trial", "systematic_review"}
 _SAFETY_EVIDENCE_TYPES = {"case_report", "observational_study"}
+_LOWER_LEVEL_EVIDENCE_TYPES = {
+    "observational_study",
+    "narrative_review",
+    "case_report",
+    "unknown",
+}
+_EVIDENCE_RANK = {
+    "guideline": 0,
+    "systematic_review": 1,
+    "randomized_controlled_trial": 2,
+    "observational_study": 3,
+    "narrative_review": 4,
+    "case_report": 5,
+    "unknown": 6,
+}
 _DIRECTIONS = {"supports", "opposes", "uncertain"}
 _TOKEN_PATTERN = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]+")
 _STOPWORDS = {
@@ -86,6 +115,8 @@ class EvidenceClaim:
     limitations: tuple[str, ...] = ()
     source_quote: str = ""
     follow_up: str = ""
+    clinical_aspect: str = "other"
+    evidence_role: str = "supplement"
 
     def __post_init__(self) -> None:
         if not self.claim_id.strip() or not self.document_id.strip():
@@ -96,6 +127,10 @@ class EvidenceClaim:
             raise ValueError("At least one source chunk is required")
         if self.direction not in _DIRECTIONS:
             raise ValueError("Claim direction is invalid")
+        if self.clinical_aspect not in CLINICAL_ASPECTS:
+            raise ValueError("Clinical aspect is invalid")
+        if self.evidence_role not in EVIDENCE_ROLES:
+            raise ValueError("Evidence role is invalid")
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -119,6 +154,8 @@ class EvidenceClaim:
             "source_quote": self.source_quote,
             "source_chunk_ids": list(self.source_chunk_ids),
             "follow_up": self.follow_up,
+            "clinical_aspect": self.clinical_aspect,
+            "evidence_role": self.evidence_role,
         }
 
 
@@ -309,55 +346,81 @@ class LocalGraphBuilder:
     def _pair_relation(
         self, first: EvidenceClaim, second: EvidenceClaim
     ) -> GraphEdge | None:
-        update = _update_roles(first, second)
-        if update is not None:
-            study, guideline = update
-            return GraphEdge(
-                source=study.claim_id,
-                target=guideline.claim_id,
-                relation="updates",
-                source_claim_ids=(study.claim_id, guideline.claim_id),
-                rationale=(
-                    "The higher-level study was published after the guideline evidence "
-                    "cutoff and addresses the same population, intervention, and outcome."
-                ),
-            )
-
-        if not _core_overlap(first, second):
+        if _incompatible_context(first, second):
             return None
-        source, target = _newer_first(first, second)
-        if _comparable(first, second) and {
-            first.direction,
-            second.direction,
-        } == {"supports", "opposes"}:
-            return GraphEdge(
-                source=source.claim_id,
-                target=target.claim_id,
-                relation="conflicts",
-                source_claim_ids=(source.claim_id, target.claim_id),
-                rationale="Comparable claims report opposite effect directions.",
+        source, target = _relation_roles(first, second)
+        source_aspect = source.clinical_aspect
+        target_aspect = target.clinical_aspect
+        same_aspect = source_aspect == target_aspect and source_aspect != "other"
+        different_aspect = (
+            source_aspect != "other"
+            and target_aspect != "other"
+            and source_aspect != target_aspect
+        )
+
+        relation = ""
+        rationale = ""
+        if _is_update(source, target, same_aspect):
+            relation = "updates"
+            rationale = (
+                "A newer trial or review addresses the same clinical aspect as the "
+                "earlier guideline and may update its evidence base."
             )
-        if (
-            _comparable(first, second)
-            and first.direction == second.direction
-            and first.direction != "uncertain"
+        elif _is_caution(source):
+            relation = "cautions"
+            rationale = (
+                "The source contributes a safety, applicability, or boundary signal "
+                "that qualifies the target evidence."
+            )
+        elif same_aspect and {source.direction, target.direction} == {
+            "supports",
+            "opposes",
+        }:
+            relation = "conflicts"
+            rationale = "Evidence on the same clinical aspect reports opposite directions."
+        elif (
+            same_aspect
+            and source.direction == target.direction
+            and source.direction != "uncertain"
+            and target.evidence_type == "guideline"
         ):
-            return GraphEdge(
-                source=source.claim_id,
-                target=target.claim_id,
-                relation="supports",
-                source_claim_ids=(source.claim_id, target.claim_id),
-                rationale="Comparable claims report the same effect direction.",
+            relation = "supports"
+            rationale = "Concordant evidence supports the guideline on the same clinical aspect."
+        elif (
+            source.evidence_type in _LOWER_LEVEL_EVIDENCE_TYPES
+            and (same_aspect or different_aspect)
+        ):
+            relation = "supplements"
+            rationale = "Lower-level evidence supplements higher-level evidence or its applicability."
+        elif _supplement_difference(source, target):
+            relation = "supplements"
+            rationale = "The source adds a different endpoint, dose, subgroup, or follow-up."
+        elif (
+            same_aspect
+            and source.direction == target.direction
+            and source.direction != "uncertain"
+        ):
+            relation = "confirms"
+            rationale = "Independent evidence confirms the same directional finding."
+        elif (
+            different_aspect
+            or (
+                source.evidence_role == "supplement"
+                and source.clinical_aspect != "other"
             )
-        if _supplement_difference(first, second):
-            return GraphEdge(
-                source=source.claim_id,
-                target=target.claim_id,
-                relation="supplements",
-                source_claim_ids=(source.claim_id, target.claim_id),
-                rationale="The claim adds evidence for a different dose, subgroup, endpoint, or follow-up.",
-            )
-        return None
+        ):
+            relation = "supplements"
+            rationale = "The source adds a different clinical aspect, endpoint, subgroup, or follow-up."
+        else:
+            return None
+
+        return GraphEdge(
+            source=source.claim_id,
+            target=target.claim_id,
+            relation=relation,
+            source_claim_ids=(source.claim_id, target.claim_id),
+            rationale=rationale,
+        )
 
     @staticmethod
     def _append_edge(
@@ -371,24 +434,59 @@ class LocalGraphBuilder:
             seen.add(key)
 
 
-def _update_roles(
+def _relation_roles(
     first: EvidenceClaim, second: EvidenceClaim
-) -> tuple[EvidenceClaim, EvidenceClaim] | None:
-    if first.evidence_type == "guideline":
-        guideline, study = first, second
-    elif second.evidence_type == "guideline":
-        guideline, study = second, first
-    else:
-        return None
+) -> tuple[EvidenceClaim, EvidenceClaim]:
+    first_rank = _EVIDENCE_RANK.get(first.evidence_type, len(_EVIDENCE_RANK))
+    second_rank = _EVIDENCE_RANK.get(second.evidence_type, len(_EVIDENCE_RANK))
+    if first_rank != second_rank:
+        return (first, second) if first_rank > second_rank else (second, first)
+    return _newer_first(first, second)
+
+
+def _is_update(
+    source: EvidenceClaim, target: EvidenceClaim, same_aspect: bool
+) -> bool:
     if (
-        study.evidence_type not in _STUDY_UPDATE_TYPES
-        or guideline.evidence_cutoff_year is None
-        or study.year is None
-        or study.year <= guideline.evidence_cutoff_year
-        or not _same_pio(study, guideline)
+        not same_aspect
+        or source.evidence_type not in _STUDY_UPDATE_TYPES
+        or target.evidence_type != "guideline"
+        or source.year is None
+        or source.direction == "uncertain"
+        or target.direction == "uncertain"
+        or source.direction != target.direction
     ):
-        return None
-    return study, guideline
+        return False
+    target_cutoff = (
+        target.evidence_cutoff_year
+        if target.evidence_cutoff_year is not None
+        else target.year
+    )
+    return target_cutoff is not None and source.year > target_cutoff
+
+
+def _is_caution(source: EvidenceClaim) -> bool:
+    return (
+        source.safety_signal
+        or source.evidence_role == "boundary"
+        or source.clinical_aspect == "safety"
+    )
+
+
+def _incompatible_context(first: EvidenceClaim, second: EvidenceClaim) -> bool:
+    if (
+        first.population.strip()
+        and second.population.strip()
+        and not _population_overlap(first.population, second.population)
+    ):
+        return True
+    if (
+        first.intervention.strip()
+        and second.intervention.strip()
+        and not _terms_overlap(first.intervention, second.intervention)
+    ):
+        return True
+    return False
 
 
 def _same_pio(first: EvidenceClaim, second: EvidenceClaim) -> bool:
