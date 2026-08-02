@@ -186,13 +186,41 @@ def grounded_chat_responses() -> tuple[dict, dict]:
                 }
             ]
         },
-        {
-            "analysis_steps": [
-                {"title": "Evidence", "body": "One RCT.[1]", "source_ids": [1]}
-            ],
-            "final_answer_markdown": "Low dose is supported.[1]",
-        },
+        grounded_report_response("Low dose was supported."),
     )
+
+
+def grounded_report_response(statement: str) -> dict:
+    stages = (
+        ("inventory", "第一步：检索并盘点证据库存"),
+        ("guidelines", "第二步：优先查看指南"),
+        ("systematic_reviews", "第三步：查阅系统综述，检验指南结论"),
+        ("randomized_trials", "第四步：聚焦关键随机对照试验"),
+        ("lower_level_evidence", "第五步：用下级证据补充安全性与边界"),
+        ("synthesis", "第六步：检查一致性并形成综合判断"),
+    )
+    final_answer = "\n\n".join(
+        (
+            "## 综合回答",
+            f"{statement}[1]",
+            f"### 证据链\n{statement}[1]",
+            f"### 时间更新\n{statement}[1]",
+            f"### 安全性与适用边界\n{statement}[1]",
+            f"### 证据缺口\n{statement}[1]",
+        )
+    )
+    return {
+        "analysis_steps": [
+            {
+                "stage_key": stage_key,
+                "title": title,
+                "body": f"{statement}[1]",
+                "source_ids": [1],
+            }
+            for stage_key, title in stages
+        ],
+        "final_answer_markdown": final_answer,
+    }
 
 
 def test_query_returns_two_part_report_and_numbers_after_deduplication(
@@ -498,12 +526,7 @@ def test_production_pipeline_runs_retrieval_claim_graph_and_report_in_order() ->
                         }
                     ]
                 }
-            return {
-                "analysis_steps": [
-                    {"title": "Evidence", "body": "One RCT.[1]", "source_ids": [1]}
-                ],
-                "final_answer_markdown": "Low dose is supported.[1]",
-            }
+            return grounded_report_response("Low dose was supported.")
 
     chat = Chat()
     pipeline = ProductionQueryPipeline(
@@ -519,7 +542,10 @@ def test_production_pipeline_runs_retrieval_claim_graph_and_report_in_order() ->
 
     assert result["model_used"] is True
     assert result["sources"][0]["chunk_ids"] == ["chunk-1"]
-    assert any(node["node_type"] == "claim" for node in result["graph"]["nodes"])
+    assert len(result["reasoning_steps"]) == 6
+    assert {node["node_type"] for node in result["graph"]["nodes"]} == {"document"}
+    assert "confirm_count" in result["summary"]
+    assert "caution_count" in result["summary"]
     assert result["retrieval_stats"]["claim_count"] == 1
 
 
@@ -600,12 +626,7 @@ def test_metadata_only_hit_can_supply_a_grounded_graph_claim() -> None:
                         }
                     ]
                 }
-            return {
-                "analysis_steps": [
-                    {"title": "Evidence", "body": "One trial.[1]", "source_ids": [1]}
-                ],
-                "final_answer_markdown": "Low dose was supported.[1]",
-            }
+            return grounded_report_response("Low dose reduced fever duration.")
 
     chat = Chat()
     pipeline = ProductionQueryPipeline(
@@ -622,4 +643,4 @@ def test_metadata_only_hit_can_supply_a_grounded_graph_claim() -> None:
     assert result["sources"][0]["fulltext"] is False
     assert result["sources"][0]["chunk_ids"] == ["doc-1"]
     assert result["retrieval_stats"]["claim_count"] == 1
-    assert any(node["node_type"] == "claim" for node in result["graph"]["nodes"])
+    assert {node["node_type"] for node in result["graph"]["nodes"]} == {"document"}

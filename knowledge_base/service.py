@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from .chat_client import ChatClient
 from .config import Settings
+from .document_graph import build_document_graph
 from .embedding_client import EmbeddingClient
 from .errors import KnowledgeBaseError
 from .evidence_classifier import EvidenceAssessment, classify_evidence
@@ -358,8 +359,18 @@ class ProductionQueryPipeline:
         except Exception:
             claim_error = "claim_extraction_failed"
             validated = extractive_fallback_claims(sources)
-        graph = self.graph_builder.build(question, validated.claims).as_dict()
-        bundle = EvidenceBundle(sources=sources, graph=graph)
+        claim_graph = self.graph_builder.build(question, validated.claims).as_dict()
+        graph = build_document_graph(
+            sources,
+            validated.claims,
+            claim_graph,
+            limit=10,
+        )
+        bundle = EvidenceBundle(
+            sources=sources,
+            graph=graph,
+            claims=validated.claims,
+        )
         report = reporter.generate_with_fallback(question, bundle)
         relation_counts = Counter(edge["relation"] for edge in graph["edges"])
         model_error = report.model_error or claim_error
@@ -376,8 +387,12 @@ class ProductionQueryPipeline:
             "summary": {
                 "evidence_count": len(sources),
                 "relation_count": len(graph["edges"]),
+                "support_count": relation_counts["supports"],
                 "update_count": relation_counts["updates"],
+                "supplement_count": relation_counts["supplements"],
+                "confirm_count": relation_counts["confirms"],
                 "conflict_count": relation_counts["conflicts"],
+                "caution_count": relation_counts["cautions"],
             },
             "sources": [source.as_dict() for source in sources],
             "graph": graph,

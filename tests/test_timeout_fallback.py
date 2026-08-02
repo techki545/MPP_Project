@@ -122,7 +122,9 @@ def test_timeout_still_returns_extractable_synthesis_and_relation_graph() -> Non
 
     assert result["model_error"] == "chat_timeout"
     assert result["retrieval_stats"]["claim_count"] == 3
-    assert len(result["graph"]["edges"]) >= 3
+    assert len(result["graph"]["nodes"]) == 3
+    assert {node["node_type"] for node in result["graph"]["nodes"]} == {"document"}
+    assert result["graph"]["edges"] == []
     assert len(result["reasoning_steps"]) == 6
     assert [step["stage_key"] for step in result["reasoning_steps"]] == [
         "inventory",
@@ -248,7 +250,8 @@ def test_empty_model_claims_fall_back_to_extractive_claims() -> None:
     result = pipeline.run("Clinical question", SearchFilters())
 
     assert result["retrieval_stats"]["claim_count"] == 1
-    assert len(result["graph"]["edges"]) == 1
+    assert len(result["graph"]["nodes"]) == 1
+    assert result["graph"]["edges"] == []
 
 
 def test_claim_extractor_resolves_quote_id_to_exact_source_text() -> None:
@@ -411,4 +414,5 @@ def test_partial_model_claims_are_completed_with_extractive_claims() -> None:
     result = pipeline.run("Clinical question", SearchFilters())
 
     assert result["retrieval_stats"]["claim_count"] == 2
-    assert len(result["graph"]["edges"]) == 2
+    assert len(result["graph"]["nodes"]) == 2
+    assert result["graph"]["edges"] == []
