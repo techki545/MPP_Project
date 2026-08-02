@@ -100,7 +100,8 @@ function cacheDom() {
     modelStatus: document.querySelector("#model-status"),
     dataSourceLabel: document.querySelector("#data-source-label"),
     stats: {
-      metadata_records: document.querySelector("#stat-metadata"),
+      source_metadata_records: document.querySelector("#stat-metadata"),
+      unique_documents: document.querySelector("#stat-unique"),
       pdf_files: document.querySelector("#stat-pdf"),
       matched_pdf_files: document.querySelector("#stat-matched"),
       parsed_pdf_files: document.querySelector("#stat-parsed"),

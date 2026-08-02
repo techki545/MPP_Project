@@ -785,8 +785,11 @@ class SQLiteStore:
 
     def statistics(self) -> dict[str, int]:
         with self._connection() as connection:
-            metadata_records = connection.execute(
+            unique_documents = connection.execute(
                 "SELECT COUNT(*) FROM documents"
+            ).fetchone()[0]
+            source_metadata_records = connection.execute(
+                "SELECT COUNT(*) FROM document_sources"
             ).fetchone()[0]
             pdf_files = connection.execute("SELECT COUNT(*) FROM files").fetchone()[0]
             matched_pdf_files = connection.execute(
@@ -803,7 +806,9 @@ class SQLiteStore:
                 "SELECT COUNT(*) FROM ingest_errors"
             ).fetchone()[0]
         return {
-            "metadata_records": int(metadata_records),
+            "metadata_records": int(unique_documents),
+            "source_metadata_records": int(source_metadata_records),
+            "unique_documents": int(unique_documents),
             "pdf_files": int(pdf_files),
             "matched_pdf_files": int(matched_pdf_files),
             "parsed_pdf_files": int(parsed_pdf_files),

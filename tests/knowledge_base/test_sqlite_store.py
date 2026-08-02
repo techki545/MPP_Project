@@ -120,6 +120,8 @@ def test_document_chunks_and_service_statistics_are_available(
     assert store.list_chunks_for_document("doc-1", limit=1) == [chunk]
     assert store.statistics() == {
         "metadata_records": 1,
+        "source_metadata_records": 0,
+        "unique_documents": 1,
         "pdf_files": 1,
         "matched_pdf_files": 1,
         "parsed_pdf_files": 0,

@@ -701,6 +701,7 @@ h3 {
   padding-bottom: 42px;
   display: grid;
   grid-template-columns: minmax(0, 1.75fr) minmax(300px, 0.85fr);
+  align-items: start;
   gap: 28px;
 }
 
@@ -895,9 +896,13 @@ h3 {
 
 .source-detail {
   min-width: 0;
+  max-height: min(72vh, 760px);
   margin-top: 17px;
+  padding-right: 5px;
   padding-top: 15px;
   border-top: 1px solid var(--line);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .source-detail h3 {
@@ -1058,6 +1063,12 @@ h3 {
 
   .source-list {
     max-height: none;
+  }
+
+  .source-detail {
+    max-height: none;
+    padding-right: 0;
+    overflow-y: visible;
   }
 }
 

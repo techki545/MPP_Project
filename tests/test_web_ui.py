@@ -21,7 +21,9 @@ class FakeWorkbenchService:
     def knowledge_base_status(self):
         return {
             "status": "ready",
-            "metadata_records": 35408,
+            "metadata_records": 34074,
+            "source_metadata_records": 35408,
+            "unique_documents": 34074,
             "pdf_files": 909,
             "matched_pdf_files": 909,
             "parsed_pdf_files": 909,
@@ -175,6 +177,7 @@ def test_workbench_has_no_browser_api_key_and_renders_grounded_sources() -> None
         page.goto(base_url)
 
         page.get_by_text("35,408").wait_for()
+        page.get_by_text("34,074").wait_for()
         page.get_by_label("临床问题").fill("SMPP儿童是否应常规使用糖皮质激素？")
         assert page.locator("#api-key").count() == 0
         page.get_by_role("button", name="开始循证分析").click()
@@ -188,6 +191,22 @@ def test_workbench_has_no_browser_api_key_and_renders_grounded_sources() -> None
         page.get_by_text("Low dose result").wait_for()
         assert page.get_by_text("Introduction text that was not hit by this query").count() == 0
         assert page.get_by_role("link", name="在浏览器中查看 PDF").is_visible()
+        assert page.locator(".evidence-workspace").evaluate(
+            "element => getComputedStyle(element).alignItems"
+        ) == "start"
+        detail_metrics = page.locator("#source-detail").evaluate(
+            """element => {
+                const paragraph = element.querySelector('.snippet-list p');
+                paragraph.textContent = 'long evidence text '.repeat(3000);
+                return {
+                    clientHeight: element.clientHeight,
+                    scrollHeight: element.scrollHeight,
+                    overflowY: getComputedStyle(element).overflowY,
+                };
+            }"""
+        )
+        assert detail_metrics["overflowY"] == "auto"
+        assert detail_metrics["scrollHeight"] > detail_metrics["clientHeight"]
         browser.close()
 
 
