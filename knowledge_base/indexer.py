@@ -14,6 +14,7 @@ from filelock import FileLock, Timeout as FileLockTimeout
 
 from .chunker import chunk_pages
 from .deduplicator import DocumentLookup, hash_file, match_pdf
+from .evidence_classifier import classify_evidence
 from .errors import KnowledgeBaseError
 from .metadata_loader import (
     CsvDecodeDiagnostics,
@@ -545,6 +546,13 @@ def build_default_pipeline(
         for csv_path in csv_paths:
             for _, document in load_csv_document_items(csv_path, diagnostics=[]):
                 imported_rows += 1
+                assessment = classify_evidence(document.title, document.abstract)
+                document = replace(
+                    document,
+                    evidence_type=assessment.evidence_type,
+                    classification_confidence=assessment.confidence,
+                    classification_basis=assessment.basis,
+                )
                 record_id = f"{csv_path.name}:{document.source_row}:{document.source_id}"
                 input_hash = sha256(
                     json.dumps(

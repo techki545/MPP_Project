@@ -324,7 +324,7 @@ def test_default_pipeline_builds_local_metadata_pdf_chunks_and_fts(tmp_path: Pat
     source.mkdir()
     (source / "metadata.csv").write_text(
         "ID,Author,Publication Year,Title,Publication Title,DOI,Url,Abstract Note,Language\n"
-        "1,Zhang,2025,Steroid Trial,Journal,,,Randomized treatment evidence,en\n",
+        "1,Zhang,2025,Randomized Controlled Trial of Steroid,Journal,,,Randomized treatment evidence,en\n",
         encoding="utf-8",
     )
     pdf_path = source / "1-Steroid Trial.pdf"
@@ -351,6 +351,8 @@ def test_default_pipeline_builds_local_metadata_pdf_chunks_and_fts(tmp_path: Pat
     assert result.stage_counters["pdf_match"]["matched"] == 1
     assert result.stage_counters["chunk"]["chunks"] >= 1
     assert store.search_fulltext("randomized treatment", limit=5)
+    document = store.search_metadata("Randomized Controlled Trial", limit=1)[0]
+    assert document.payload["evidence_type"] == "randomized_controlled_trial"
 
 
 def test_metadata_change_relinks_existing_pdf_and_rebuilds_chunks(tmp_path: Path) -> None:
