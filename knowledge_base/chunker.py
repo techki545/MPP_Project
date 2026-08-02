@@ -22,11 +22,30 @@ _HEADING_RE = re.compile(
 @dataclass(frozen=True)
 class _Fragment:
     text: str
-    tokens: tuple[str, ...]
+    token_spans: tuple[tuple[int, int], ...]
+    source_id: int
     page_number: int
     section: str
     used_ocr: bool
     quality: str
+
+    def slice_tokens(self, start: int, end: int) -> "_Fragment":
+        if start < 0 or end <= start or end > len(self.token_spans):
+            raise ValueError("invalid token slice")
+        start_offset = 0 if start == 0 else self.token_spans[start][0]
+        end_offset = len(self.text) if end == len(self.token_spans) else self.token_spans[end][0]
+        return _Fragment(
+            text=self.text[start_offset:end_offset],
+            token_spans=tuple(
+                (match_start - start_offset, match_end - start_offset)
+                for match_start, match_end in self.token_spans[start:end]
+            ),
+            source_id=self.source_id,
+            page_number=self.page_number,
+            section=self.section,
+            used_ocr=self.used_ocr,
+            quality=self.quality,
+        )
 
 
 def approximate_token_count(text: str) -> int:
@@ -57,12 +76,12 @@ def chunk_pages(
             current_section = fragment.section
 
         for part in _split_fragment(fragment, target_tokens):
-            if current and _token_total(current) + len(part.tokens) > target_tokens:
+            if current and _token_total(current) + len(part.token_spans) > target_tokens:
                 chunks.append(_make_chunk(document_id, file_id, current))
                 current = _tail_fragments(current, overlap_tokens)
                 # The retained tail belongs to the next window.  It must be
                 # combined with the incoming part rather than emitted alone.
-            if current and _token_total(current) + len(part.tokens) > max_chunk_tokens:
+            if current and _token_total(current) + len(part.token_spans) > max_chunk_tokens:
                 current = _tail_fragments(current, overlap_tokens)
             current.append(part)
             current_section = part.section
@@ -83,47 +102,50 @@ def _validate_window(target_tokens: int, overlap_tokens: int, max_chunk_tokens: 
 
 def _page_fragments(pages: Sequence[ParsedPage]) -> Iterable[_Fragment]:
     section = ""
+    source_id = 0
     for page in pages:
         paragraph_lines: list[str] = []
-        for raw_line in page.text.splitlines():
+        for raw_line in page.text.splitlines(keepends=True):
             line = raw_line.strip()
             if not line:
-                yield from _paragraph_fragment(paragraph_lines, page, section)
+                yield from _paragraph_fragment("".join(paragraph_lines), page, section, source_id)
+                source_id += 1
                 paragraph_lines = []
                 continue
             heading = _HEADING_RE.match(line)
             if heading:
-                yield from _paragraph_fragment(paragraph_lines, page, section)
+                yield from _paragraph_fragment("".join(paragraph_lines), page, section, source_id)
+                source_id += 1
                 paragraph_lines = []
                 section = heading.group(1)
             else:
-                paragraph_lines.append(line)
-        yield from _paragraph_fragment(paragraph_lines, page, section)
+                paragraph_lines.append(raw_line)
+        yield from _paragraph_fragment("".join(paragraph_lines), page, section, source_id)
+        source_id += 1
 
 
 def _paragraph_fragment(
-    lines: list[str], page: ParsedPage, section: str
+    text: str, page: ParsedPage, section: str, source_id: int
 ) -> Iterable[_Fragment]:
-    text = " ".join(lines).strip()
-    tokens = tuple(_TOKEN_RE.findall(text))
-    if tokens:
-        yield _Fragment(text, tokens, page.page_number, section, page.used_ocr, page.quality)
+    token_spans = tuple((match.start(), match.end()) for match in _TOKEN_RE.finditer(text))
+    if token_spans:
+        yield _Fragment(
+            text,
+            token_spans,
+            source_id,
+            page.page_number,
+            section,
+            page.used_ocr,
+            page.quality,
+        )
 
 
 def _split_fragment(fragment: _Fragment, target_tokens: int) -> Iterable[_Fragment]:
-    if len(fragment.tokens) <= target_tokens:
+    if len(fragment.token_spans) <= target_tokens:
         yield fragment
         return
-    for start in range(0, len(fragment.tokens), target_tokens):
-        tokens = fragment.tokens[start : start + target_tokens]
-        yield _Fragment(
-            " ".join(tokens),
-            tokens,
-            fragment.page_number,
-            fragment.section,
-            fragment.used_ocr,
-            fragment.quality,
-        )
+    for start in range(0, len(fragment.token_spans), target_tokens):
+        yield fragment.slice_tokens(start, min(start + target_tokens, len(fragment.token_spans)))
 
 
 def _tail_fragments(fragments: list[_Fragment], overlap_tokens: int) -> list[_Fragment]:
@@ -134,33 +156,24 @@ def _tail_fragments(fragments: list[_Fragment], overlap_tokens: int) -> list[_Fr
     for fragment in reversed(fragments):
         if remaining <= 0:
             break
-        tail = fragment.tokens[-remaining:]
-        selected.append(
-            _Fragment(
-                " ".join(tail),
-                tail,
-                fragment.page_number,
-                fragment.section,
-                fragment.used_ocr,
-                fragment.quality,
-            )
-        )
-        remaining -= len(tail)
+        take = min(remaining, len(fragment.token_spans))
+        selected.append(fragment.slice_tokens(len(fragment.token_spans) - take, len(fragment.token_spans)))
+        remaining -= take
     return list(reversed(selected))
 
 
 def _token_total(fragments: Sequence[_Fragment]) -> int:
-    return sum(len(fragment.tokens) for fragment in fragments)
+    return sum(len(fragment.token_spans) for fragment in fragments)
 
 
 def _make_chunk(document_id: str, file_id: str, fragments: Sequence[_Fragment]) -> ChunkRecord:
-    text = "\n\n".join(fragment.text for fragment in fragments)
+    text = _join_fragment_texts(fragments)
     page_start = min(fragment.page_number for fragment in fragments)
     page_end = max(fragment.page_number for fragment in fragments)
     section = fragments[0].section
     is_ocr = any(fragment.used_ocr for fragment in fragments)
     quality = _conservative_quality(fragments, is_ocr)
-    token_count = _token_total(fragments)
+    token_count = approximate_token_count(text)
     digest = sha256(
         f"{document_id}|{file_id}|{page_start}|{page_end}|{section}|{text}".encode("utf-8")
     ).hexdigest()
@@ -177,6 +190,14 @@ def _make_chunk(document_id: str, file_id: str, fragments: Sequence[_Fragment]) 
         quality=quality,
         content_hash=sha256(text.encode("utf-8")).hexdigest(),
     )
+
+
+def _join_fragment_texts(fragments: Sequence[_Fragment]) -> str:
+    parts = [fragments[0].text]
+    for previous, fragment in zip(fragments, fragments[1:]):
+        separator = "" if previous.source_id == fragment.source_id else "\n\n"
+        parts.append(separator + fragment.text)
+    return "".join(parts)
 
 
 def _conservative_quality(fragments: Sequence[_Fragment], is_ocr: bool) -> str:

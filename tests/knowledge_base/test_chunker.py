@@ -63,6 +63,21 @@ def test_overlap_and_hard_limit_split_a_long_paragraph_without_looping() -> None
     assert chunks[-1].page_end == 1
 
 
+def test_long_paragraph_windows_preserve_exact_medical_notation_and_spacing() -> None:
+    phrase = "剂量为 2 mg/kg/d，P < 0.05；β-lactam 方案有效。"
+    pages = (ParsedPage(1, " ".join([phrase] * 8), False, "extracted"),)
+
+    chunks = chunk_pages("doc", "file", pages, target_tokens=12, overlap_tokens=4, max_chunk_tokens=16)
+
+    assert len(chunks) > 1
+    combined = "\n".join(chunk.text for chunk in chunks)
+    assert "2 mg/kg/d" in combined
+    assert "P < 0.05" in combined
+    assert "β-lactam" in combined
+    assert all(approximate_token_count(chunk.text) == chunk.token_count for chunk in chunks)
+    assert all(chunk.text in pages[0].text for chunk in chunks)
+
+
 @pytest.mark.parametrize(
     ("target_tokens", "overlap_tokens", "max_chunk_tokens"),
     [(0, 0, 900), (-1, 0, 900), (10, -1, 900), (10, 10, 900), (10, 0, 0), (50, 0, 40)],

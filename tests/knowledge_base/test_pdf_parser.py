@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pymupdf
 import pytest
@@ -163,6 +164,7 @@ def test_parser_preserves_successful_parse_when_document_close_raises(
 
     class ClosingDocument:
         is_encrypted = False
+        page_count = 0
 
         def __iter__(self):
             return iter(())
@@ -173,6 +175,161 @@ def test_parser_preserves_successful_parse_when_document_close_raises(
     monkeypatch.setattr(pdf_parser_module.pymupdf, "open", lambda _: ClosingDocument())
 
     assert PDFParser().parse(path) == ParsedPDF("parsed", ())
+
+
+def test_parser_uses_page_indexes_and_retains_pages_around_load_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "load-error.pdf"
+    path.write_bytes(b"placeholder")
+
+    class FakePage:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def get_text(self, _: str, *, sort: bool) -> str:
+            assert sort is True
+            return self.text
+
+    class IndexedDocument:
+        is_encrypted = False
+        page_count = 3
+
+        def __iter__(self):
+            raise AssertionError("parser must not use the document iterator")
+
+        def load_page(self, index: int) -> FakePage:
+            if index == 1:
+                raise RuntimeError("page load failure")
+            return FakePage("Readable extracted text that is long enough for normal indexing.")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(pdf_parser_module.pymupdf, "open", lambda _: IndexedDocument())
+
+    result = PDFParser().parse(path)
+
+    assert result.status == "partial"
+    assert result.error_code == "pdf_page_error"
+    assert [page.page_number for page in result.pages] == [1, 2, 3]
+    assert result.pages[1] == ParsedPage(2, "", False, "page_error")
+    assert result.pages[2].quality == "extracted"
+
+
+def test_parser_keeps_exact_200_dpi_for_normal_ocr_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "normal-render.pdf"
+    path.write_bytes(b"placeholder")
+    calls: list[tuple[int, bool]] = []
+
+    class FakePixmap:
+        def tobytes(self, kind: str) -> bytes:
+            assert kind == "png"
+            return b"png"
+
+    class FakePage:
+        rect = SimpleNamespace(width=72.0, height=72.0)
+
+        def get_text(self, _: str, *, sort: bool) -> str:
+            return ""
+
+        def get_pixmap(self, *, dpi: int, alpha: bool) -> FakePixmap:
+            calls.append((dpi, alpha))
+            return FakePixmap()
+
+    class FakeDocument:
+        is_encrypted = False
+        page_count = 1
+
+        def load_page(self, _: int) -> FakePage:
+            return FakePage()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(pdf_parser_module.pymupdf, "open", lambda _: FakeDocument())
+
+    result = PDFParser(ocr=lambda _: "usable OCR text").parse(path)
+
+    assert calls == [(200, False)]
+    assert result.pages[0].quality == "ocr"
+
+
+def test_parser_reduces_ocr_dpi_to_stay_within_pixel_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "large-render.pdf"
+    path.write_bytes(b"placeholder")
+    calls: list[tuple[int, bool]] = []
+
+    class FakePixmap:
+        def tobytes(self, _: str) -> bytes:
+            return b"png"
+
+    class FakePage:
+        rect = SimpleNamespace(width=720.0, height=720.0)
+
+        def get_text(self, _: str, *, sort: bool) -> str:
+            return ""
+
+        def get_pixmap(self, *, dpi: int, alpha: bool) -> FakePixmap:
+            calls.append((dpi, alpha))
+            return FakePixmap()
+
+    class FakeDocument:
+        is_encrypted = False
+        page_count = 1
+
+        def load_page(self, _: int) -> FakePage:
+            return FakePage()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(pdf_parser_module.pymupdf, "open", lambda _: FakeDocument())
+
+    result = PDFParser(
+        ocr=lambda _: "usable OCR text", max_ocr_pixels=1_000_000
+    ).parse(path)
+
+    assert calls == [(100, False)]
+    assert result.pages[0].quality == "ocr_reduced"
+
+
+def test_parser_skips_ocr_when_even_minimum_dpi_exceeds_pixel_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "too-large.pdf"
+    path.write_bytes(b"placeholder")
+
+    class FakePage:
+        rect = SimpleNamespace(width=7200.0, height=7200.0)
+
+        def get_text(self, _: str, *, sort: bool) -> str:
+            return ""
+
+        def get_pixmap(self, **_: object) -> object:
+            raise AssertionError("unsafe pixmap rendering should not occur")
+
+    class FakeDocument:
+        is_encrypted = False
+        page_count = 1
+
+        def load_page(self, _: int) -> FakePage:
+            return FakePage()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(pdf_parser_module.pymupdf, "open", lambda _: FakeDocument())
+
+    result = PDFParser(ocr=lambda _: "unused", max_ocr_pixels=1).parse(path)
+
+    assert result.status == "partial"
+    assert result.error_code == "pdf_ocr_too_large"
+    assert result.pages == (ParsedPage(1, "", False, "ocr_too_large"),)
 
 
 def test_ocr_failure_stays_at_page_boundary(tmp_path: Path) -> None:
