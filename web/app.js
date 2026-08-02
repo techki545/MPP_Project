@@ -1,598 +1,318 @@
 "use strict";
 
-const SVG_NS = "http://www.w3.org/2000/svg";
-
-const TYPE_STYLES = {
-  guideline: { color: "#176b4d", soft: "#e8f3ed" },
-  systematic_review: { color: "#315f75", soft: "#eaf1f5" },
-  randomized_controlled_trial: { color: "#a56713", soft: "#fff3dd" },
-  observational_study: { color: "#6f5b7c", soft: "#f1edf4" },
-  narrative_review: { color: "#68746e", soft: "#f0f3f1" },
-  case_report: { color: "#a3443d", soft: "#faecea" },
+const TYPE_LABELS = {
+  guideline: "指南",
+  systematic_review: "系统综述",
+  randomized_controlled_trial: "随机对照试验（RCT）",
+  observational_study: "观察性研究",
+  narrative_review: "叙述性综述",
+  case_report: "病例报告",
+  unknown: "未分类",
 };
 
-const RELATION_STYLES = {
-  supports: { color: "#176b4d", label: "支持" },
-  updates: { color: "#a56713", label: "更新" },
-  supplements: { color: "#315f75", label: "补充" },
-  confirms: { color: "#6f5b7c", label: "确认" },
-  cautions: { color: "#a3443d", label: "警示" },
+const TYPE_ORDER = [
+  "guideline",
+  "systematic_review",
+  "randomized_controlled_trial",
+  "observational_study",
+  "narrative_review",
+  "case_report",
+];
+
+const RELATION_LABELS = {
+  supports: "支持",
+  updates: "更新",
+  supplements: "补充",
+  conflicts: "冲突",
+  cautions: "警示",
+};
+
+const STAGE_LABELS = {
+  metadata: "导入元数据",
+  pdf_inventory: "盘点 PDF",
+  pdf_match: "匹配文献与 PDF",
+  parse: "解析 PDF",
+  chunk: "语义分块",
+  lexical: "建立关键词索引",
+  embedding: "生成向量",
+  vector: "写入向量库",
 };
 
 const state = {
   catalog: null,
-  visibleTypes: new Set(),
-  selectedNodeId: null,
-  analysis: null,
-  busy: false,
-  toastTimer: null,
+  kbStatus: null,
+  modelStatus: null,
+  result: null,
+  sources: new Map(),
+  activeSource: null,
+  currentJobId: null,
+  pollTimer: null,
 };
 
 const dom = {};
 
-document.addEventListener("DOMContentLoaded", initializeApp);
+document.addEventListener("DOMContentLoaded", initialize);
 
-async function initializeApp() {
-  bindDom();
+async function initialize() {
+  cacheDom();
   bindEvents();
-  restoreModelSettings();
   updateQuestionCount();
+  setDefaultYears();
   try {
-    const catalog = await apiRequest("/api/evidence");
+    const [health, kbStatus, modelStatus, catalog] = await Promise.all([
+      fetchJson("/api/health"),
+      fetchJson("/api/kb/status"),
+      fetchJson("/api/model/status"),
+      fetchJson("/api/evidence"),
+    ]);
+    state.kbStatus = kbStatus;
+    state.modelStatus = modelStatus;
     state.catalog = catalog;
-    state.visibleTypes = new Set(catalog.evidence_types.map((item) => item.key));
-    dom.question.value = catalog.default_question;
-    updateQuestionCount();
-    renderFilters();
-    renderGraph();
-    renderEvidenceList();
-    renderInitialSummary();
-    const firstNode = visibleNodes()[0];
-    if (firstNode) {
-      selectEvidence(firstNode.id);
+    renderSystemStatus(health, kbStatus, modelStatus);
+    renderCorpusMetrics(kbStatus);
+    renderEvidenceFilters(catalog.evidence_types || []);
+    if (!dom.question.value.trim()) {
+      dom.question.value = catalog.default_question || "";
+      updateQuestionCount();
+    }
+    const demoMode = kbStatus.status !== "ready";
+    dom.dataSourceLabel.textContent = demoMode ? "示例证据模式" : "真实本地语料";
+    dom.dataSourceLabel.dataset.mode = demoMode ? "demo" : "knowledge_base";
+    if (demoMode && Array.isArray(catalog.nodes)) {
+      renderGraph({ nodes: catalog.nodes, edges: catalog.edges || [] });
     }
   } catch (error) {
-    dom.graphMeta.textContent = "证据图加载失败";
-    showToast(error.message);
+    renderStartupFailure(error);
   }
 }
 
-function bindDom() {
-  dom.question = document.getElementById("clinical-question");
-  dom.questionCount = document.getElementById("question-count");
-  dom.generateButton = document.getElementById("generate-answer");
-  dom.progress = document.getElementById("analysis-progress");
-  dom.filters = document.getElementById("evidence-filters");
-  dom.toggleAllTypes = document.getElementById("toggle-all-types");
-  dom.modelSettings = document.getElementById("model-settings");
-  dom.focusSettings = document.getElementById("focus-settings");
-  dom.apiKey = document.getElementById("api-key");
-  dom.baseUrl = document.getElementById("base-url");
-  dom.modelName = document.getElementById("model-name");
-  dom.testModelButton = document.getElementById("test-model");
-  dom.toggleKeyVisibility = document.getElementById("toggle-key-visibility");
-  dom.modelStatus = document.getElementById("model-status");
-  dom.graph = document.getElementById("evidence-graph");
-  dom.graphMeta = document.getElementById("graph-meta");
-  dom.graphEmpty = document.getElementById("graph-empty");
-  dom.analysisChips = document.getElementById("analysis-chips");
-  dom.decisionSummary = document.getElementById("decision-summary");
-  dom.evidenceList = document.getElementById("evidence-list");
-  dom.evidenceCount = document.getElementById("visible-evidence-count");
-  dom.evidenceDetail = document.getElementById("evidence-detail");
-  dom.reasoningSteps = document.getElementById("reasoning-steps");
-  dom.finalAnswer = document.getElementById("final-answer");
-  dom.reportModel = document.getElementById("report-model");
-  dom.answerGrounding = document.getElementById("answer-grounding");
-  dom.toast = document.getElementById("toast");
+function cacheDom() {
+  Object.assign(dom, {
+    question: document.querySelector("#clinical-question"),
+    questionCount: document.querySelector("#question-count"),
+    runQuery: document.querySelector("#run-query"),
+    queryStatus: document.querySelector("#query-status"),
+    filters: document.querySelector("#evidence-filters"),
+    yearFrom: document.querySelector("#year-from"),
+    yearTo: document.querySelector("#year-to"),
+    fulltextOnly: document.querySelector("#fulltext-only"),
+    kbStatus: document.querySelector("#kb-status"),
+    modelStatus: document.querySelector("#model-status"),
+    dataSourceLabel: document.querySelector("#data-source-label"),
+    stats: {
+      metadata_records: document.querySelector("#stat-metadata"),
+      pdf_files: document.querySelector("#stat-pdf"),
+      matched_pdf_files: document.querySelector("#stat-matched"),
+      parsed_pdf_files: document.querySelector("#stat-parsed"),
+      chunks: document.querySelector("#stat-chunks"),
+      embedded: document.querySelector("#stat-embedded"),
+    },
+    buildKb: document.querySelector("#build-kb"),
+    pauseKb: document.querySelector("#pause-kb"),
+    continueKb: document.querySelector("#continue-kb"),
+    retryKb: document.querySelector("#retry-kb"),
+    retryStage: document.querySelector("#retry-stage"),
+    jobProgress: document.querySelector("#job-progress"),
+    jobStage: document.querySelector("#job-stage"),
+    jobState: document.querySelector("#job-state"),
+    reasoningSteps: document.querySelector("#reasoning-steps"),
+    finalAnswer: document.querySelector("#final-answer"),
+    retrievalMode: document.querySelector("#retrieval-mode"),
+    reportModel: document.querySelector("#report-model"),
+    groundingStatus: document.querySelector("#grounding-status"),
+    graph: document.querySelector("#evidence-graph"),
+    graphEmpty: document.querySelector("#graph-empty"),
+    graphMeta: document.querySelector("#graph-meta"),
+    sourceList: document.querySelector("#source-list"),
+    sourceCount: document.querySelector("#source-count"),
+    sourceDetail: document.querySelector("#source-detail"),
+    toast: document.querySelector("#toast"),
+  });
 }
 
 function bindEvents() {
-  dom.question.addEventListener("input", handleQuestionInput);
-  dom.generateButton.addEventListener("click", submitAnalysis);
-  dom.testModelButton.addEventListener("click", testModelConnection);
-  dom.toggleAllTypes.addEventListener("click", toggleAllEvidenceTypes);
-  dom.focusSettings.addEventListener("click", () => {
-    dom.modelSettings.open = true;
-    dom.modelSettings.scrollIntoView({ behavior: "smooth", block: "center" });
-    dom.apiKey.focus({ preventScroll: true });
+  dom.question.addEventListener("input", updateQuestionCount);
+  dom.runQuery.addEventListener("click", runQuery);
+  dom.buildKb.addEventListener("click", () => startBuild(false));
+  dom.continueKb.addEventListener("click", () => {
+    if (window.confirm("继续向量化将调用服务器配置的嵌入模型，是否确认？")) {
+      startBuild(true);
+    }
   });
-  dom.toggleKeyVisibility.addEventListener("click", () => {
-    dom.apiKey.type = dom.apiKey.type === "password" ? "text" : "password";
-  });
-  dom.baseUrl.addEventListener("change", persistModelSettings);
-  dom.modelName.addEventListener("change", persistModelSettings);
+  dom.pauseKb.addEventListener("click", pauseBuild);
+  dom.retryKb.addEventListener("click", retryBuild);
+  dom.sourceList.addEventListener("click", handleSourceClick);
+  dom.reasoningSteps.addEventListener("click", handleSourceClick);
+  dom.finalAnswer.addEventListener("click", handleSourceClick);
+}
+
+function setDefaultYears() {
+  dom.yearFrom.value = "2015";
+  dom.yearTo.value = String(new Date().getFullYear());
 }
 
 function updateQuestionCount() {
-  dom.questionCount.textContent = `${dom.question.value.length} / 500`;
+  dom.questionCount.textContent = `${dom.question.value.length} / 2000`;
 }
 
-function handleQuestionInput() {
-  updateQuestionCount();
-  if (invalidateReport("临床问题已变更，当前报告已失效")) {
-    renderGraph();
-    renderEvidenceList();
-    renderEvidenceDetail();
+function renderSystemStatus(health, kbStatus, modelStatus) {
+  const ready = kbStatus.status === "ready";
+  setStatusPill(
+    dom.kbStatus,
+    ready ? "ready" : "warning",
+    ready ? "知识库可查询" : "知识库未构建"
+  );
+  const configured = Boolean(modelStatus.configured);
+  setStatusPill(
+    dom.modelStatus,
+    configured ? "ready" : "warning",
+    configured ? `模型 ${modelStatus.chat_model || "已配置"}` : "模型未配置"
+  );
+  if (health.status === "degraded" && ready) {
+    setStatusPill(dom.kbStatus, "warning", "知识库降级可用");
   }
 }
 
-function restoreModelSettings() {
-  const savedBaseUrl = sessionStorage.getItem("graphRagBaseUrl");
-  const savedModelName = sessionStorage.getItem("graphRagModelName");
-  if (savedBaseUrl) {
-    dom.baseUrl.value = savedBaseUrl;
-  }
-  if (savedModelName) {
-    dom.modelName.value = savedModelName;
-  }
+function setStatusPill(element, status, label) {
+  element.dataset.state = status;
+  const labelNode = element.querySelector("span");
+  if (labelNode) labelNode.textContent = label;
 }
 
-function persistModelSettings() {
-  sessionStorage.setItem("graphRagBaseUrl", dom.baseUrl.value.trim());
-  sessionStorage.setItem("graphRagModelName", dom.modelName.value.trim());
+function renderCorpusMetrics(status) {
+  const numberFormat = new Intl.NumberFormat("zh-CN");
+  Object.entries(dom.stats).forEach(([key, element]) => {
+    const value = Number(status[key] || 0);
+    element.textContent = numberFormat.format(Number.isFinite(value) ? value : 0);
+  });
 }
 
-function renderFilters() {
+function renderEvidenceFilters(items) {
+  const catalogByType = new Map(items.map((item) => [item.key, item]));
   dom.filters.replaceChildren();
-  if (!state.catalog) {
-    return;
-  }
-  state.catalog.evidence_types.forEach((evidenceType) => {
+  TYPE_ORDER.forEach((type) => {
+    const catalogItem = catalogByType.get(type) || {};
     const label = document.createElement("label");
-    label.className = "filter-row";
-
+    label.className = "evidence-filter";
+    label.dataset.type = type;
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
-    checkbox.checked = state.visibleTypes.has(evidenceType.key);
-    checkbox.dataset.evidenceType = evidenceType.key;
-    checkbox.addEventListener("change", () => {
-      if (checkbox.checked) {
-        state.visibleTypes.add(evidenceType.key);
-      } else {
-        state.visibleTypes.delete(evidenceType.key);
-      }
-      handleFilterChange();
-    });
-
-    const swatch = document.createElement("span");
-    swatch.className = "filter-swatch";
-    swatch.style.setProperty("--swatch", typeStyle(evidenceType.key).color);
-
-    const name = document.createElement("span");
-    name.textContent = evidenceType.label;
-
-    const count = document.createElement("span");
-    count.className = "filter-count";
-    count.textContent = String(evidenceType.count);
-
-    label.append(checkbox, swatch, name, count);
+    checkbox.value = type;
+    checkbox.checked = true;
+    const swatch = document.createElement("i");
+    swatch.className = "type-swatch";
+    swatch.setAttribute("aria-hidden", "true");
+    const text = document.createElement("span");
+    text.textContent = catalogItem.label || TYPE_LABELS[type];
+    label.append(checkbox, swatch, text);
     dom.filters.append(label);
   });
-  updateToggleAllLabel();
 }
 
-function toggleAllEvidenceTypes() {
-  if (!state.catalog) {
+async function runQuery() {
+  const question = dom.question.value.trim();
+  if (!question) {
+    setQueryStatus("请输入临床问题。", "error");
+    dom.question.focus();
     return;
   }
-  const allKeys = state.catalog.evidence_types.map((item) => item.key);
-  if (state.visibleTypes.size === allKeys.length) {
-    state.visibleTypes.clear();
-  } else {
-    state.visibleTypes = new Set(allKeys);
-  }
-  renderFilters();
-  handleFilterChange();
-}
-
-function updateToggleAllLabel() {
-  const total = state.catalog ? state.catalog.evidence_types.length : 0;
-  dom.toggleAllTypes.textContent = state.visibleTypes.size === total ? "全不选" : "全选";
-}
-
-function handleFilterChange() {
-  invalidateReport("证据筛选已变更，当前报告已失效");
-  const nodes = visibleNodes();
-  if (!nodes.some((node) => node.id === state.selectedNodeId)) {
-    state.selectedNodeId = nodes[0] ? nodes[0].id : null;
-  }
-  renderGraph();
-  renderEvidenceList();
-  renderEvidenceDetail();
-  updateToggleAllLabel();
-}
-
-function visibleNodes() {
-  return activeNodes().filter((node) => state.visibleTypes.has(node.evidence_type));
-}
-
-function visibleEdges(nodes) {
-  const ids = new Set(nodes.map((node) => node.id));
-  return activeEdges().filter(
-    (edge) => ids.has(edge.source) && ids.has(edge.target),
-  );
-}
-
-function activeNodes() {
-  if (state.analysis && Array.isArray(state.analysis.evidence)) {
-    return state.analysis.evidence;
-  }
-  return state.catalog ? state.catalog.nodes : [];
-}
-
-function activeEdges() {
-  if (state.analysis && Array.isArray(state.analysis.edges)) {
-    return state.analysis.edges;
-  }
-  return state.catalog ? state.catalog.edges : [];
-}
-
-function renderGraph() {
-  const nodes = visibleNodes();
-  const edges = visibleEdges(nodes);
-  dom.graph.replaceChildren();
-  dom.graphEmpty.hidden = nodes.length > 0;
-  dom.graphMeta.textContent = `${nodes.length} 个节点 · ${edges.length} 条关系 · 按证据层级布局`;
-  dom.evidenceCount.textContent = String(nodes.length);
-  if (!nodes.length) {
-    dom.graph.setAttribute("viewBox", "0 0 760 360");
+  const yearFrom = optionalInteger(dom.yearFrom.value);
+  const yearTo = optionalInteger(dom.yearTo.value);
+  if (yearFrom !== null && yearTo !== null && yearFrom > yearTo) {
+    setQueryStatus("起始年份不能晚于结束年份。", "error");
     return;
   }
+  const evidenceTypes = Array.from(
+    dom.filters.querySelectorAll("input[type='checkbox']:checked")
+  ).map((input) => input.value);
+  const payload = {
+    question,
+    evidence_types: evidenceTypes,
+    year_from: yearFrom,
+    year_to: yearTo,
+    fulltext_only: dom.fulltextOnly.checked,
+  };
 
-  const orderedTypes = state.catalog.evidence_types
-    .map((item) => item.key)
-    .filter((key) => nodes.some((node) => node.evidence_type === key));
-  const viewWidth = Math.max(760, orderedTypes.length * 170 + 70);
-  const viewHeight = 360;
-  dom.graph.setAttribute("viewBox", `0 0 ${viewWidth} ${viewHeight}`);
-
-  const defs = svgElement("defs");
-  Object.entries(RELATION_STYLES).forEach(([relation, style]) => {
-    const marker = svgElement("marker", {
-      id: `arrow-${relation}`,
-      viewBox: "0 0 8 8",
-      refX: "7",
-      refY: "4",
-      markerWidth: "6",
-      markerHeight: "6",
-      orient: "auto-start-reverse",
+  setQueryBusy(true);
+  setQueryStatus("正在执行四路检索、证据重排与关系构建…", "loading");
+  try {
+    const result = await fetchJson("/api/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
-    marker.append(svgElement("path", { d: "M 0 0 L 8 4 L 0 8 z", fill: style.color }));
-    defs.append(marker);
-  });
-  dom.graph.append(defs);
-
-  const positions = new Map();
-  orderedTypes.forEach((evidenceType, laneIndex) => {
-    const laneNodes = nodes.filter((node) => node.evidence_type === evidenceType);
-    const x = 35 + laneIndex * 170;
-    const laneTitle = svgElement("text", {
-      x: String(x + 67),
-      y: "26",
-      class: "node-type",
-      fill: typeStyle(evidenceType).color,
-      "text-anchor": "middle",
-    });
-    laneTitle.textContent = typeLabel(evidenceType);
-    dom.graph.append(laneTitle);
-    laneNodes.forEach((node, rowIndex) => {
-      positions.set(node.id, { x, y: 48 + rowIndex * 128, width: 134, height: 78 });
-    });
-  });
-
-  const selectedConnections = connectedNodeIds(state.selectedNodeId, edges);
-  edges.forEach((edge) => {
-    const source = positions.get(edge.source);
-    const target = positions.get(edge.target);
-    if (!source || !target) {
-      return;
-    }
-    const relationStyle = relationStyleFor(edge.relation);
-    const x1 = source.x + source.width;
-    const y1 = source.y + source.height / 2;
-    const x2 = target.x;
-    const y2 = target.y + target.height / 2;
-    const path = svgElement("path", {
-      d: curvedPath(x1, y1, x2, y2),
-      class: "graph-edge",
-      stroke: relationStyle.color,
-      "marker-end": `url(#arrow-${edge.relation})`,
-      "data-source": edge.source,
-      "data-target": edge.target,
-    });
-    if (
-      state.selectedNodeId
-      && edge.source !== state.selectedNodeId
-      && edge.target !== state.selectedNodeId
-    ) {
-      path.classList.add("is-muted");
-    }
-    dom.graph.append(path);
-
-    const label = svgElement("text", {
-      x: String((x1 + x2) / 2),
-      y: String((y1 + y2) / 2 - 5),
-      class: "edge-label",
-      "text-anchor": "middle",
-    });
-    label.textContent = relationStyle.label;
-    dom.graph.append(label);
-  });
-
-  nodes.forEach((node) => {
-    const position = positions.get(node.id);
-    const style = typeStyle(node.evidence_type);
-    const group = svgElement("g", {
-      class: "graph-node",
-      role: "button",
-      tabindex: "0",
-      "aria-label": node.citation,
-      "data-node-id": node.id,
-    });
-    if (node.id === state.selectedNodeId) {
-      group.classList.add("is-selected");
-    } else if (state.selectedNodeId && !selectedConnections.has(node.id)) {
-      group.classList.add("is-muted");
-    }
-    group.append(svgElement("rect", {
-      x: String(position.x),
-      y: String(position.y),
-      width: String(position.width),
-      height: String(position.height),
-      rx: "5",
-      fill: style.soft,
-      stroke: style.color,
-    }));
-
-    const typeText = svgElement("text", {
-      x: String(position.x + 10),
-      y: String(position.y + 17),
-      class: "node-type",
-      fill: style.color,
-    });
-    typeText.textContent = typeLabel(node.evidence_type);
-    group.append(typeText);
-
-    const yearText = svgElement("text", {
-      x: String(position.x + position.width - 9),
-      y: String(position.y + 17),
-      class: "node-year",
-    });
-    yearText.textContent = String(node.year);
-    group.append(yearText);
-
-    const titleLines = splitTitle(node.title, 12, 2);
-    const titleText = svgElement("text", {
-      x: String(position.x + 10),
-      y: String(position.y + 40),
-      class: "node-title",
-    });
-    titleLines.forEach((line, index) => {
-      const tspan = svgElement("tspan", {
-        x: String(position.x + 10),
-        dy: index === 0 ? "0" : "16",
-      });
-      tspan.textContent = line;
-      titleText.append(tspan);
-    });
-    group.append(titleText);
-
-    group.addEventListener("click", () => selectEvidence(node.id));
-    group.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        selectEvidence(node.id);
-      }
-    });
-    dom.graph.append(group);
-  });
-}
-
-function renderEvidenceList() {
-  const nodes = visibleNodes();
-  dom.evidenceList.replaceChildren();
-  dom.evidenceCount.textContent = String(nodes.length);
-  if (!nodes.length) {
-    dom.evidenceList.append(createParagraph("empty-state", "当前筛选条件下没有证据"));
-    return;
-  }
-  nodes.forEach((node) => {
-    const style = typeStyle(node.evidence_type);
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "evidence-item";
-    button.dataset.nodeId = node.id;
-    button.setAttribute("aria-pressed", String(node.id === state.selectedNodeId));
-    button.style.setProperty("--item-color", style.color);
-    button.style.setProperty("--item-soft", style.soft);
-    if (node.id === state.selectedNodeId) {
-      button.classList.add("is-selected");
-    }
-
-    const bar = document.createElement("span");
-    bar.className = "evidence-item-bar";
-    const content = document.createElement("span");
-    const meta = document.createElement("span");
-    meta.className = "evidence-item-meta";
-    const type = document.createElement("span");
-    type.textContent = typeLabel(node.evidence_type);
-    const year = document.createElement("span");
-    year.textContent = `${node.year} · ${qualityLabel(node.quality)}`;
-    meta.append(type, year);
-    const title = document.createElement("span");
-    title.className = "evidence-item-title";
-    title.textContent = node.title;
-    content.append(meta, title);
-    button.append(bar, content);
-    button.addEventListener("click", () => selectEvidence(node.id));
-    dom.evidenceList.append(button);
-  });
-}
-
-function selectEvidence(nodeId) {
-  state.selectedNodeId = nodeId;
-  renderGraph();
-  renderEvidenceList();
-  renderEvidenceDetail();
-}
-
-function renderEvidenceDetail() {
-  const node = activeNodes().find((item) => item.id === state.selectedNodeId);
-  dom.evidenceDetail.replaceChildren();
-  const eyebrow = createParagraph("eyebrow", "SELECTED EVIDENCE");
-  const heading = document.createElement("h2");
-  heading.id = "detail-title";
-  heading.className = "section-title";
-  heading.textContent = "证据详情";
-  dom.evidenceDetail.append(eyebrow, heading);
-  if (!node) {
-    dom.evidenceDetail.append(createParagraph("empty-state", "尚未选择证据"));
-    return;
-  }
-
-  const citation = createParagraph("detail-citation", node.citation);
-  const details = document.createElement("dl");
-  details.className = "detail-grid";
-  appendDetail(
-    details,
-    "发表时间",
-    node.month ? `${node.year} 年 ${node.month} 月` : `${node.year} 年`,
-  );
-  appendDetail(details, "来源", node.source);
-  appendDetail(details, "研究对象", node.population);
-  appendDetail(details, "干预", node.intervention);
-  appendDetail(details, "对照", node.comparator);
-  appendDetail(details, "主要发现", node.main_findings);
-  appendDetail(details, "证据质量", qualityLabel(node.quality));
-  dom.evidenceDetail.append(citation, details);
-
-  if (Array.isArray(node.safety_signals) && node.safety_signals.length) {
-    const safetyTitle = createParagraph("field-label", "安全性与局限");
-    const safetyList = document.createElement("div");
-    safetyList.className = "safety-list";
-    node.safety_signals.forEach((signal) => {
-      const tag = document.createElement("span");
-      tag.className = "safety-tag";
-      tag.textContent = signal;
-      safetyList.append(tag);
-    });
-    dom.evidenceDetail.append(safetyTitle, safetyList);
+    state.result = result;
+    indexSources(result.sources || []);
+    renderReport(result);
+    renderSources(result.sources || []);
+    renderGraph(result.graph || { nodes: [], edges: [] });
+    const warning = result.warning ? ` ${result.warning}` : "";
+    setQueryStatus(`分析完成，共返回 ${result.sources?.length || 0} 项来源。${warning}`, result.warning ? "warning" : "ready");
+    dom.dataSourceLabel.textContent = result.data_source === "demo" ? "示例证据模式" : "真实本地语料";
+    dom.dataSourceLabel.dataset.mode = result.data_source || "knowledge_base";
+    document.querySelector("#report-workspace").scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    setQueryStatus(error.message, "error");
+    showToast(error.message);
+  } finally {
+    setQueryBusy(false);
   }
 }
 
-function appendDetail(container, term, description) {
-  const wrapper = document.createElement("div");
-  wrapper.className = "detail-row";
-  const dt = document.createElement("dt");
-  dt.textContent = term;
-  const dd = document.createElement("dd");
-  dd.textContent = description || "未提供";
-  wrapper.append(dt, dd);
-  container.append(wrapper);
+function setQueryBusy(busy) {
+  dom.runQuery.disabled = busy;
+  const label = dom.runQuery.querySelector("span");
+  label.textContent = busy ? "正在分析" : "开始循证分析";
 }
 
-function renderInitialSummary() {
-  if (!state.catalog) {
-    return;
-  }
-  dom.analysisChips.replaceChildren(
-    createChip(`${state.catalog.nodes.length} 条本地证据`, "neutral"),
-    createChip("证据金字塔已加载", "good"),
-    createChip("等待时间关系分析", "update"),
-  );
-  dom.decisionSummary.textContent = "证据图已加载。生成后将合成证据一致性、时间更新与安全性判断。";
+function setQueryStatus(message, status) {
+  dom.queryStatus.textContent = message;
+  dom.queryStatus.dataset.state = status;
 }
 
-function renderAnalysis(result) {
-  const nodes = visibleNodes();
-  if (!nodes.some((node) => node.id === state.selectedNodeId)) {
-    state.selectedNodeId = nodes[0] ? nodes[0].id : null;
-  }
-  renderGraph();
-  renderEvidenceList();
-  renderEvidenceDetail();
-  dom.analysisChips.replaceChildren(
-    createChip(`${result.summary.evidence_count} 条证据`, "neutral"),
-    createChip(result.summary.consistency, "good"),
-    createChip(`${result.summary.update_count} 条时间更新`, "update"),
-  );
-  dom.decisionSummary.textContent = result.summary.conclusion;
-  renderReasoningSteps(result.reasoning_steps);
-  dom.answerGrounding.classList.remove("is-grounded", "is-local");
-  if (result.model_used) {
-    renderSafeMarkdown(dom.finalAnswer, result.answer_markdown);
-    dom.reportModel.textContent = `模型：${result.model_name}`;
-    dom.answerGrounding.textContent = "已基于证据图生成";
-    dom.answerGrounding.classList.add("is-grounded");
-  } else {
-    dom.finalAnswer.replaceChildren(
-      createParagraph("empty-state", "大模型综合回答未生成，本地循证分析已保留。"),
-    );
-    dom.reportModel.textContent = `本地分析 · ${result.model_name}`;
-    dom.answerGrounding.textContent = "本地分析已保留";
-    dom.answerGrounding.classList.add("is-local");
-  }
-}
+function renderReport(result) {
+  dom.retrievalMode.textContent = retrievalModeLabel(result.mode, result.degraded_reason);
+  dom.reportModel.textContent = result.model_used
+    ? `模型：${result.model_name || "已配置"}`
+    : "确定性回退";
+  dom.groundingStatus.textContent = result.model_used ? "引用已校验" : "模型结果未采用";
+  dom.groundingStatus.dataset.state = result.model_used ? "ready" : "warning";
 
-function invalidateReport(reason) {
-  if (!state.analysis) {
-    return false;
-  }
-  state.analysis = null;
-  dom.reasoningSteps.replaceChildren(
-    createParagraph("empty-state", "当前报告已失效"),
-  );
-  dom.finalAnswer.replaceChildren(
-    createParagraph("empty-state", "当前综合回答已失效"),
-  );
-  dom.reportModel.textContent = "报告已失效";
-  dom.answerGrounding.textContent = "报告已失效";
-  dom.answerGrounding.classList.remove("is-grounded", "is-local");
-  renderInitialSummary();
-  dom.decisionSummary.textContent = reason;
-  dom.progress.textContent = reason;
-  return true;
-}
-
-function renderReasoningSteps(steps) {
   dom.reasoningSteps.replaceChildren();
-  steps.forEach((step, index) => {
-    const details = document.createElement("details");
-    details.className = "reasoning-step";
-    details.open = index === 0 || index === steps.length - 1;
-    const summary = document.createElement("summary");
-    summary.textContent = step.title;
-    const body = document.createElement("div");
-    body.className = "reasoning-step-body";
-    body.append(document.createTextNode(step.body));
-
-    if (Array.isArray(step.node_ids) && step.node_ids.length) {
-      const references = document.createElement("div");
-      references.className = "reasoning-references";
-      step.node_ids.forEach((nodeId) => {
-        const node = activeNodes().find((item) => item.id === nodeId);
-        if (!node) {
-          return;
-        }
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "reference-button";
-        button.textContent = node.id;
-        button.title = node.citation;
-        button.addEventListener("click", () => selectEvidence(node.id));
-        references.append(button);
-      });
-      body.append(references);
-    }
-    details.append(summary, body);
-    dom.reasoningSteps.append(details);
-  });
+  const steps = Array.isArray(result.reasoning_steps) ? result.reasoning_steps : [];
+  if (!steps.length) {
+    dom.reasoningSteps.append(emptyState("本次没有可展示的循证步骤。"));
+  } else {
+    steps.forEach((step, index) => {
+      const details = document.createElement("details");
+      details.className = "reasoning-step";
+      details.open = index === 0;
+      const summary = document.createElement("summary");
+      summary.textContent = step.title || `步骤 ${index + 1}`;
+      const body = document.createElement("div");
+      body.className = "reasoning-body";
+      appendInlineContent(body, String(step.body || ""));
+      details.append(summary, body);
+      dom.reasoningSteps.append(details);
+    });
+  }
+  renderMarkdown(dom.finalAnswer, result.answer_markdown || "暂无综合回答。\n");
 }
 
-function renderSafeMarkdown(container, markdown) {
+function retrievalModeLabel(mode, reason) {
+  const labels = {
+    hybrid: "混合检索",
+    keyword: "关键词降级检索",
+    vector: "向量检索",
+    demo: "示例图谱",
+  };
+  const label = labels[mode] || String(mode || "未知模式");
+  return reason ? `${label} · ${reason}` : label;
+}
+
+function renderMarkdown(container, markdown) {
   container.replaceChildren();
-  const lines = String(markdown || "").replace(/\r/g, "").split("\n");
+  const lines = String(markdown).replace(/\r/g, "").split("\n");
   let list = null;
   lines.forEach((rawLine) => {
     const line = rawLine.trim();
@@ -600,256 +320,542 @@ function renderSafeMarkdown(container, markdown) {
       list = null;
       return;
     }
-    if (line.startsWith("### ") || line.startsWith("## ")) {
-      list = null;
-      const heading = document.createElement(line.startsWith("### ") ? "h3" : "h2");
-      appendInlineMarkdown(heading, line.replace(/^###?\s+/, ""));
+    if (line.startsWith("### ")) {
+      const heading = document.createElement("h3");
+      appendInlineContent(heading, line.slice(4));
       container.append(heading);
+      list = null;
       return;
     }
-    if (line.startsWith("- ")) {
+    if (line.startsWith("## ")) {
+      const heading = document.createElement("h2");
+      appendInlineContent(heading, line.slice(3));
+      container.append(heading);
+      list = null;
+      return;
+    }
+    if (/^[-*]\s+/.test(line)) {
       if (!list) {
         list = document.createElement("ul");
         container.append(list);
       }
       const item = document.createElement("li");
-      appendInlineMarkdown(item, line.slice(2));
+      appendInlineContent(item, line.replace(/^[-*]\s+/, ""));
       list.append(item);
       return;
     }
     list = null;
     const paragraph = document.createElement("p");
-    appendInlineMarkdown(paragraph, line);
+    appendInlineContent(paragraph, line);
     container.append(paragraph);
   });
 }
 
-function appendInlineMarkdown(container, text) {
-  const parts = String(text).split(/(\*\*[^*]+\*\*)/g);
-  parts.forEach((part) => {
-    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
-      const strong = document.createElement("strong");
-      strong.textContent = part.slice(2, -2);
-      container.append(strong);
-    } else {
-      container.append(document.createTextNode(part));
+function appendInlineContent(container, text) {
+  const tokenPattern = /(\[\d+\]|\*\*[^*]+\*\*)/g;
+  let cursor = 0;
+  for (const match of text.matchAll(tokenPattern)) {
+    if (match.index > cursor) {
+      container.append(document.createTextNode(text.slice(cursor, match.index)));
     }
+    const token = match[0];
+    if (/^\[\d+\]$/.test(token)) {
+      const number = Number(token.slice(1, -1));
+      container.append(citationButton(number));
+    } else {
+      const strong = document.createElement("strong");
+      strong.textContent = token.slice(2, -2);
+      container.append(strong);
+    }
+    cursor = match.index + token.length;
+  }
+  if (cursor < text.length) {
+    container.append(document.createTextNode(text.slice(cursor)));
+  }
+}
+
+function citationButton(number) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "citation-button";
+  button.dataset.sourceNumber = String(number);
+  button.setAttribute("aria-label", `查看来源 ${number}`);
+  button.textContent = `[${number}]`;
+  return button;
+}
+
+function indexSources(sources) {
+  state.sources.clear();
+  sources.forEach((source) => {
+    state.sources.set(Number(source.source_number), source);
   });
 }
 
-async function submitAnalysis() {
-  if (state.busy) {
+function renderSources(sources) {
+  dom.sourceList.replaceChildren();
+  dom.sourceCount.textContent = String(sources.length);
+  if (!sources.length) {
+    dom.sourceList.append(emptyState("本次检索没有返回来源。"));
+    renderEmptySourceDetail();
     return;
   }
-  const question = dom.question.value.trim();
-  if (!question) {
-    dom.question.focus();
-    showToast("请输入临床问题。");
-    return;
-  }
-  if (!state.visibleTypes.size) {
-    showToast("至少保留一种证据类型。 ");
-    return;
-  }
-  const model = readModelConfig();
-  if (!model) {
-    return;
-  }
+  sources.forEach((source) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "source-item";
+    button.dataset.sourceNumber = String(source.source_number);
+    button.setAttribute("aria-label", `查看来源 ${source.source_number}：${source.title}`);
+    const number = document.createElement("span");
+    number.className = "source-number";
+    number.textContent = String(source.source_number);
+    const copy = document.createElement("span");
+    copy.className = "source-copy";
+    const title = document.createElement("span");
+    title.className = "source-title";
+    title.textContent = source.title || source.document_id;
+    const meta = document.createElement("span");
+    meta.className = "source-meta";
+    meta.append(
+      textSpan(TYPE_LABELS[source.evidence_type] || source.evidence_type || "未分类"),
+      textSpan(source.year ? String(source.year) : "年份未知"),
+      textSpan(source.fulltext ? "全文命中" : "元数据命中")
+    );
+    copy.append(title, meta);
+    button.append(number, copy);
+    dom.sourceList.append(button);
+  });
+}
 
-  setBusy(true, "正在检索证据、检查时间关系并调用大模型...");
+function textSpan(text) {
+  const span = document.createElement("span");
+  span.textContent = text;
+  return span;
+}
+
+function handleSourceClick(event) {
+  const trigger = event.target.closest("[data-source-number]");
+  if (!trigger) return;
+  const sourceNumber = Number(trigger.dataset.sourceNumber);
+  if (Number.isInteger(sourceNumber)) selectSource(sourceNumber);
+}
+
+async function selectSource(sourceNumber) {
+  const source = state.sources.get(sourceNumber);
+  if (!source) {
+    showToast(`来源 ${sourceNumber} 不在本次结果中。`);
+    return;
+  }
+  state.activeSource = sourceNumber;
+  document.querySelectorAll(".source-item").forEach((item) => {
+    item.setAttribute(
+      "aria-current",
+      item.dataset.sourceNumber === String(sourceNumber) ? "true" : "false"
+    );
+  });
+  renderSourceLoading(source);
   try {
-    const result = await apiRequest("/api/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question,
-        evidence_types: Array.from(state.visibleTypes),
-        model,
-      }),
-    });
-    state.analysis = result;
-    renderAnalysis(result);
-    persistModelSettings();
-    if (result.model_used) {
-      setModelStatus("connected", `模型已连接 · ${result.model_name}`);
-      dom.progress.textContent = "循证分析已完成";
-    } else {
-      setModelStatus("error", "模型请求失败 · 本地分析已保留");
-      dom.progress.textContent = "本地循证分析已完成，模型回答未生成";
-      showToast(result.model_error.message);
-    }
-    document.querySelector(".report-section").scrollIntoView({ behavior: "smooth", block: "start" });
+    const detail = await fetchJson(`/api/documents/${encodeURIComponent(source.document_id)}`);
+    renderSourceDetail(detail, sourceNumber);
+    dom.sourceDetail.scrollIntoView({ behavior: "smooth", block: "nearest" });
   } catch (error) {
-    setModelStatus("error", "模型请求失败");
-    dom.progress.textContent = "本地证据图保持可用";
-    showToast(error.message);
-  } finally {
-    setBusy(false);
+    renderSourceError(source, error.message);
   }
 }
 
-async function testModelConnection() {
-  if (state.busy) {
-    return;
+function renderSourceLoading(source) {
+  dom.sourceDetail.replaceChildren();
+  const heading = document.createElement("h3");
+  heading.id = "source-detail-title";
+  heading.textContent = source.title || "文献详情";
+  dom.sourceDetail.append(heading, emptyState("正在加载文献详情…"));
+}
+
+function renderSourceDetail(detail, sourceNumber) {
+  dom.sourceDetail.replaceChildren();
+  const heading = document.createElement("h3");
+  heading.id = "source-detail-title";
+  heading.textContent = detail.title || `来源 ${sourceNumber}`;
+  const bibliography = document.createElement("dl");
+  bibliography.className = "bibliography";
+  addBibliographyRow(bibliography, "作者", formatAuthors(detail.authors));
+  addBibliographyRow(bibliography, "期刊 / 年份", [detail.journal, detail.year].filter(Boolean).join(" · ") || "未知");
+  addBibliographyRow(bibliography, "DOI", detail.doi || "未提供");
+  addBibliographyRow(bibliography, "证据类型", TYPE_LABELS[detail.evidence_type] || detail.evidence_type || "未分类");
+  addBibliographyRow(bibliography, "质量", qualityLabel(detail.quality));
+  addBibliographyRow(bibliography, "全文状态", detail.has_fulltext ? `可用 · ${detail.fulltext_status || "已解析"}` : "仅元数据");
+  dom.sourceDetail.append(heading, bibliography);
+
+  if (detail.abstract) {
+    const abstractHeading = document.createElement("h4");
+    abstractHeading.className = "snippet-heading";
+    abstractHeading.textContent = "摘要";
+    const abstract = document.createElement("p");
+    abstract.className = "empty-state";
+    abstract.textContent = detail.abstract;
+    dom.sourceDetail.append(abstractHeading, abstract);
   }
-  const model = readModelConfig();
-  if (!model) {
-    return;
-  }
-  setBusy(true, "正在测试模型连接...");
-  try {
-    const result = await apiRequest("/api/model/test", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model }),
+
+  const snippetHeading = document.createElement("h4");
+  snippetHeading.className = "snippet-heading";
+  snippetHeading.textContent = "命中的正文片段";
+  const snippetList = document.createElement("div");
+  snippetList.className = "snippet-list";
+  const snippets = Array.isArray(detail.matched_snippets) ? detail.matched_snippets : [];
+  if (!snippets.length) {
+    snippetList.append(emptyState("该文献当前没有可展示的全文片段。"));
+  } else {
+    snippets.forEach((snippet) => {
+      const item = document.createElement("article");
+      item.className = "snippet";
+      const text = document.createElement("p");
+      text.textContent = snippet.text || "";
+      const meta = document.createElement("small");
+      meta.textContent = `${snippet.section || "未标注章节"} · 第 ${pageRange(snippet.page_start, snippet.page_end)} 页${snippet.is_ocr ? " · OCR" : ""}`;
+      item.append(text, meta);
+      snippetList.append(item);
     });
-    setModelStatus("connected", `模型已连接 · ${result.model_name}`);
-    dom.progress.textContent = "模型连接测试成功";
-    persistModelSettings();
-  } catch (error) {
-    setModelStatus("error", "模型连接失败");
-    dom.progress.textContent = "模型连接测试失败";
-    showToast(error.message);
-  } finally {
-    setBusy(false);
+  }
+  dom.sourceDetail.append(snippetHeading, snippetList);
+
+  if (detail.pdf_available) {
+    const link = document.createElement("a");
+    link.className = "pdf-link";
+    link.href = `/api/documents/${encodeURIComponent(detail.document_id)}/pdf`;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = "在浏览器中查看 PDF";
+    dom.sourceDetail.append(link);
   }
 }
 
-function readModelConfig() {
-  const model = {
-    api_key: dom.apiKey.value.trim(),
-    base_url: dom.baseUrl.value.trim(),
-    model_name: dom.modelName.value.trim(),
+function renderSourceError(source, message) {
+  dom.sourceDetail.replaceChildren();
+  const heading = document.createElement("h3");
+  heading.id = "source-detail-title";
+  heading.textContent = source.title || "文献详情";
+  dom.sourceDetail.append(heading, emptyState(message));
+}
+
+function renderEmptySourceDetail() {
+  dom.sourceDetail.replaceChildren();
+  const heading = document.createElement("h3");
+  heading.id = "source-detail-title";
+  heading.textContent = "文献详情";
+  dom.sourceDetail.append(heading, emptyState("选择来源后查看书目信息和命中正文。"));
+}
+
+function addBibliographyRow(list, label, value) {
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const description = document.createElement("dd");
+  description.textContent = String(value || "未知");
+  list.append(term, description);
+}
+
+function formatAuthors(authors) {
+  return Array.isArray(authors) && authors.length ? authors.join("，") : "未提供";
+}
+
+function qualityLabel(value) {
+  return {
+    high: "高",
+    moderate: "中等",
+    low: "低",
+    very_low: "极低",
+    unknown: "未知",
+  }[value] || value || "未知";
+}
+
+function pageRange(start, end) {
+  if (!start && !end) return "未知";
+  return start === end || !end ? String(start) : `${start}–${end}`;
+}
+
+function renderGraph(graph) {
+  const rawNodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+  const rawEdges = Array.isArray(graph.edges) ? graph.edges : [];
+  const nodes = rawNodes.slice(0, 24).map(normalizeGraphNode);
+  const visibleIds = new Set(nodes.map((node) => node.id));
+  const edges = rawEdges
+    .map((edge) => ({ ...edge, relation: edge.relation === "confirms" ? "supports" : edge.relation }))
+    .filter((edge) => visibleIds.has(String(edge.source)) && visibleIds.has(String(edge.target)));
+  dom.graph.replaceChildren();
+  dom.graphMeta.textContent = `${nodes.length} 个节点 · ${edges.length} 条关系`;
+  if (!nodes.length) {
+    dom.graphEmpty.hidden = false;
+    return;
+  }
+  dom.graphEmpty.hidden = true;
+  const layerCounts = new Map();
+  nodes.forEach((node) => layerCounts.set(node.type, (layerCounts.get(node.type) || 0) + 1));
+  const widestRow = Math.min(5, Math.max(...layerCounts.values()));
+  const compactViewport = dom.graph.clientWidth < 500;
+  const viewWidth = widestRow <= 2 ? (compactViewport ? 480 : 640) : widestRow === 3 ? 760 : 1000;
+  const positions = graphLayout(nodes, viewWidth);
+  const height = Math.max(420, Math.max(...Array.from(positions.values()).map((value) => value.y)) + 90);
+  dom.graph.setAttribute("viewBox", `0 0 ${viewWidth} ${height}`);
+  dom.graph.setAttribute("preserveAspectRatio", "xMidYMid meet");
+
+  edges.forEach((edge) => {
+    const source = positions.get(String(edge.source));
+    const target = positions.get(String(edge.target));
+    if (!source || !target) return;
+    const line = svgElement("line");
+    line.classList.add("graph-edge");
+    line.dataset.relation = edge.relation || "supports";
+    line.setAttribute("x1", source.x);
+    line.setAttribute("y1", source.y);
+    line.setAttribute("x2", target.x);
+    line.setAttribute("y2", target.y);
+    const title = svgElement("title");
+    title.textContent = `${RELATION_LABELS[edge.relation] || edge.relation || "关系"}：${edge.rationale || ""}`;
+    line.append(title);
+    dom.graph.append(line);
+  });
+
+  nodes.forEach((node) => {
+    const position = positions.get(node.id);
+    const group = svgElement("g");
+    group.classList.add("graph-node");
+    group.dataset.nodeId = node.id;
+    group.dataset.nodeType = node.type;
+    group.setAttribute("transform", `translate(${position.x - 76} ${position.y - 27})`);
+    const rect = svgElement("rect");
+    rect.setAttribute("width", "152");
+    rect.setAttribute("height", "54");
+    const label = svgElement("text");
+    label.setAttribute("x", "76");
+    label.setAttribute("y", "22");
+    label.setAttribute("text-anchor", "middle");
+    wrapSvgLabel(label, node.label);
+    const title = svgElement("title");
+    title.textContent = node.label;
+    group.append(rect, label, title);
+    dom.graph.append(group);
+  });
+}
+
+function normalizeGraphNode(node) {
+  const id = String(node.node_id ?? node.id ?? "unknown");
+  const payload = node.payload || {};
+  return {
+    id,
+    type: String(node.node_type || payload.node_type || (id === "question" ? "question" : "document")),
+    label: String(node.label || node.title || payload.title || id),
   };
-  if (!model.api_key || !model.base_url || !model.model_name) {
-    dom.modelSettings.open = true;
-    const missingField = !model.api_key ? dom.apiKey : (!model.base_url ? dom.baseUrl : dom.modelName);
-    missingField.focus();
-    showToast("请填写 API Key、Base URL 和模型名称。 ");
-    return null;
+}
+
+function graphLayout(nodes, viewWidth) {
+  const layers = ["question", "document", "claim", "outcome"];
+  const grouped = new Map(layers.map((layer) => [layer, []]));
+  nodes.forEach((node) => {
+    const layer = grouped.has(node.type) ? node.type : "document";
+    grouped.get(layer).push(node);
+  });
+  const positions = new Map();
+  let y = 55;
+  layers.forEach((layer) => {
+    const items = grouped.get(layer);
+    if (!items.length) return;
+    for (let start = 0; start < items.length; start += 5) {
+      const row = items.slice(start, start + 5);
+      const spacing = (viewWidth - 120) / row.length;
+      row.forEach((node, index) => {
+        positions.set(node.id, { x: 60 + spacing * (index + 0.5), y });
+      });
+      y += 92;
+    }
+  });
+  return positions;
+}
+
+function wrapSvgLabel(textNode, label) {
+  const clean = String(label).replace(/\s+/g, " ").trim();
+  const first = clean.slice(0, 18);
+  const second = clean.length > 18 ? `${clean.slice(18, 34)}${clean.length > 34 ? "…" : ""}` : "";
+  const firstLine = svgElement("tspan");
+  firstLine.setAttribute("x", "76");
+  firstLine.textContent = first;
+  textNode.append(firstLine);
+  if (second) {
+    const secondLine = svgElement("tspan");
+    secondLine.setAttribute("x", "76");
+    secondLine.setAttribute("dy", "16");
+    secondLine.textContent = second;
+    textNode.append(secondLine);
   }
-  return model;
 }
 
-function setBusy(busy, message) {
-  state.busy = busy;
-  dom.generateButton.disabled = busy;
-  dom.testModelButton.disabled = busy;
-  if (message) {
-    dom.progress.textContent = message;
-  }
+function svgElement(name) {
+  return document.createElementNS("http://www.w3.org/2000/svg", name);
 }
 
-function setModelStatus(status, message) {
-  dom.modelStatus.dataset.state = status;
-  dom.modelStatus.lastChild.textContent = message;
-}
-
-async function apiRequest(path, options = {}) {
-  let response;
+async function startBuild(confirmEmbeddingCost) {
+  setJobControls(true);
   try {
-    response = await fetch(path, options);
+    const job = await fetchJson("/api/kb/build", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm_embedding_cost: confirmEmbeddingCost }),
+    });
+    beginJobPolling(job);
+    showToast(confirmEmbeddingCost ? "已开始本地构建与向量化。" : "已开始免费本地构建阶段。");
   } catch (error) {
-    throw new Error("无法连接本地 Graph RAG 服务。", { cause: error });
+    setJobControls(false);
+    showToast(error.message);
   }
+}
+
+async function pauseBuild() {
+  if (!state.currentJobId) return;
+  try {
+    const job = await fetchJson("/api/kb/pause", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: state.currentJobId }),
+    });
+    renderJob(job);
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function retryBuild() {
+  const stage = dom.retryStage.value;
+  const paidStage = stage === "embedding" || stage === "vector";
+  const confirmed = !paidStage || window.confirm("重试该阶段可能调用嵌入模型，是否确认？");
+  if (!confirmed) return;
+  setJobControls(true);
+  try {
+    const job = await fetchJson("/api/kb/retry", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stage, confirm_embedding_cost: paidStage }),
+    });
+    beginJobPolling(job);
+  } catch (error) {
+    setJobControls(false);
+    showToast(error.message);
+  }
+}
+
+function beginJobPolling(job) {
+  state.currentJobId = job.job_id;
+  renderJob(job);
+  if (state.pollTimer) clearTimeout(state.pollTimer);
+  pollJob();
+}
+
+async function pollJob() {
+  if (!state.currentJobId) return;
+  try {
+    const job = await fetchJson(`/api/jobs/${encodeURIComponent(state.currentJobId)}`);
+    renderJob(job);
+    if (["paused", "completed", "failed"].includes(job.state)) {
+      state.currentJobId = null;
+      setJobControls(false);
+      await refreshKbStatus();
+      return;
+    }
+  } catch (error) {
+    showToast(error.message);
+    state.currentJobId = null;
+    setJobControls(false);
+    return;
+  }
+  state.pollTimer = window.setTimeout(pollJob, 1100);
+}
+
+function renderJob(job) {
+  const progress = job.progress || {};
+  const stage = progress.stage || progress.current_stage || "";
+  dom.jobStage.textContent = stage ? STAGE_LABELS[stage] || stage : jobStateLabel(job.state);
+  dom.jobState.textContent = jobStateLabel(job.state);
+  const terminal = ["paused", "completed", "failed"].includes(job.state);
+  if (terminal) {
+    dom.jobProgress.value = job.state === "completed" ? 100 : 0;
+  } else {
+    dom.jobProgress.removeAttribute("value");
+  }
+  dom.pauseKb.disabled = !["queued", "running", "pausing"].includes(job.state);
+}
+
+function jobStateLabel(value) {
+  return {
+    queued: "等待执行",
+    running: "正在构建",
+    pausing: "正在安全暂停",
+    paused: "已暂停",
+    completed: "已完成",
+    failed: "构建失败",
+  }[value] || "空闲";
+}
+
+function setJobControls(active) {
+  dom.buildKb.disabled = active;
+  dom.continueKb.disabled = active;
+  dom.retryKb.disabled = active;
+  dom.retryStage.disabled = active;
+  dom.pauseKb.disabled = !active;
+}
+
+async function refreshKbStatus() {
+  try {
+    const status = await fetchJson("/api/kb/status");
+    state.kbStatus = status;
+    renderCorpusMetrics(status);
+    setStatusPill(
+      dom.kbStatus,
+      status.status === "ready" ? "ready" : "warning",
+      status.status === "ready" ? "知识库可查询" : "知识库未构建"
+    );
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function renderStartupFailure(error) {
+  setStatusPill(dom.kbStatus, "error", "知识库连接失败");
+  setStatusPill(dom.modelStatus, "error", "后端状态未知");
+  setQueryStatus(error.message, "error");
+  showToast(error.message);
+}
+
+function optionalInteger(value) {
+  const clean = String(value).trim();
+  if (!clean) return null;
+  const parsed = Number(clean);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+function emptyState(message) {
+  const paragraph = document.createElement("p");
+  paragraph.className = "empty-state";
+  paragraph.textContent = message;
+  return paragraph;
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
   let payload;
   try {
     payload = await response.json();
-  } catch (error) {
-    throw new Error("服务返回了无法解析的数据。", { cause: error });
+  } catch {
+    throw new Error("服务器返回了无法解析的响应。");
   }
   if (!response.ok) {
-    throw new Error(payload.error && payload.error.message ? payload.error.message : "请求失败。 ");
+    const error = payload?.error || {};
+    throw new Error(error.message || `请求失败（HTTP ${response.status}）`);
   }
   return payload;
 }
 
+let toastTimer = null;
 function showToast(message) {
-  window.clearTimeout(state.toastTimer);
   dom.toast.textContent = message;
   dom.toast.hidden = false;
-  state.toastTimer = window.setTimeout(() => {
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
     dom.toast.hidden = true;
-  }, 4800);
-}
-
-function createChip(text, variant) {
-  const chip = document.createElement("span");
-  chip.className = `analysis-chip ${variant}`;
-  chip.textContent = text;
-  return chip;
-}
-
-function createParagraph(className, text) {
-  const paragraph = document.createElement("p");
-  paragraph.className = className;
-  paragraph.textContent = text;
-  return paragraph;
-}
-
-function svgElement(tagName, attributes = {}) {
-  const element = document.createElementNS(SVG_NS, tagName);
-  Object.entries(attributes).forEach(([name, value]) => element.setAttribute(name, value));
-  return element;
-}
-
-function curvedPath(x1, y1, x2, y2) {
-  const direction = x2 >= x1 ? 1 : -1;
-  const bend = Math.max(34, Math.abs(x2 - x1) * 0.42) * direction;
-  return `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`;
-}
-
-function connectedNodeIds(selectedId, edges) {
-  const ids = new Set();
-  if (!selectedId) {
-    return ids;
-  }
-  ids.add(selectedId);
-  edges.forEach((edge) => {
-    if (edge.source === selectedId) {
-      ids.add(edge.target);
-    }
-    if (edge.target === selectedId) {
-      ids.add(edge.source);
-    }
-  });
-  return ids;
-}
-
-function splitTitle(title, maxLength, maxLines) {
-  const characters = Array.from(String(title));
-  const lines = [];
-  for (let index = 0; index < characters.length && lines.length < maxLines; index += maxLength) {
-    let line = characters.slice(index, index + maxLength).join("");
-    if (index + maxLength < characters.length && lines.length === maxLines - 1) {
-      line = `${line.slice(0, Math.max(1, maxLength - 1))}…`;
-    }
-    lines.push(line);
-  }
-  return lines;
-}
-
-function typeStyle(evidenceType) {
-  return TYPE_STYLES[evidenceType] || { color: "#627069", soft: "#f0f3f1" };
-}
-
-function relationStyleFor(relation) {
-  return RELATION_STYLES[relation] || { color: "#627069", label: relation };
-}
-
-function typeLabel(evidenceType) {
-  if (!state.catalog) {
-    return evidenceType;
-  }
-  const match = state.catalog.evidence_types.find((item) => item.key === evidenceType);
-  return match ? match.label : evidenceType;
-}
-
-function qualityLabel(quality) {
-  return {
-    high: "高质量",
-    moderate: "中等质量",
-    low: "低质量",
-    very_low: "极低质量",
-  }[quality] || quality;
+  }, 4200);
 }
