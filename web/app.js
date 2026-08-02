@@ -45,6 +45,7 @@ const state = {
   catalog: null,
   kbStatus: null,
   modelStatus: null,
+  startupFailed: false,
   result: null,
   sources: new Map(),
   activeSource: null,
@@ -62,6 +63,7 @@ async function initialize() {
   bindEvents();
   updateQuestionCount();
   setDefaultYears();
+  state.startupFailed = false;
   try {
     const [health, kbStatus, modelStatus, catalog] = await Promise.all([
       fetchJson("/api/health"),
@@ -71,6 +73,7 @@ async function initialize() {
     ]);
     state.kbStatus = kbStatus;
     state.modelStatus = modelStatus;
+    state.startupFailed = false;
     state.catalog = catalog;
     renderSystemStatus(health, kbStatus, modelStatus);
     renderCorpusMetrics(kbStatus);
@@ -86,6 +89,7 @@ async function initialize() {
       renderGraph({ nodes: catalog.nodes, edges: catalog.edges || [] });
     }
   } catch (error) {
+    state.startupFailed = true;
     renderStartupFailure(error);
   }
 }
@@ -181,11 +185,7 @@ function clearBrowserModelConfig() {
 
 function resetBrowserModelConfig() {
   clearBrowserModelConfig();
-  if (state.modelStatus) {
-    renderModelStatus();
-  } else {
-    setStatusPill(dom.modelStatus, "error", "后端状态未知");
-  }
+  renderModelStatus();
 }
 
 function handleModelConfigInput() {
@@ -268,13 +268,20 @@ function renderModelStatus() {
     setStatusPill(dom.modelStatus, "warning", "模型配置待补全");
     return;
   }
-  if (!state.modelStatus) return;
-  const configured = Boolean(state.modelStatus.configured);
-  setStatusPill(
-    dom.modelStatus,
-    configured ? "ready" : "warning",
-    configured ? `模型 ${state.modelStatus.chat_model || "已配置"}` : "模型未配置"
-  );
+  if (state.modelStatus) {
+    const configured = Boolean(state.modelStatus.configured);
+    setStatusPill(
+      dom.modelStatus,
+      configured ? "ready" : "warning",
+      configured ? `模型 ${state.modelStatus.chat_model || "已配置"}` : "模型未配置"
+    );
+    return;
+  }
+  if (state.startupFailed) {
+    setStatusPill(dom.modelStatus, "warning", "后端状态未知");
+    return;
+  }
+  setStatusPill(dom.modelStatus, "loading", "模型状态加载中");
 }
 
 function setStatusPill(element, status, label) {
@@ -1004,11 +1011,7 @@ async function refreshKbStatus() {
 
 function renderStartupFailure(error) {
   setStatusPill(dom.kbStatus, "error", "知识库连接失败");
-  if (browserModelConfigState() === "empty") {
-    setStatusPill(dom.modelStatus, "error", "后端状态未知");
-  } else {
-    renderModelStatus();
-  }
+  renderModelStatus();
   setQueryStatus(error.message, "error");
   showToast(error.message);
 }

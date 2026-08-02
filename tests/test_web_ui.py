@@ -447,10 +447,17 @@ def test_startup_failure_preserves_completed_browser_model_status() -> None:
         page.goto(base_url)
         assert service.health_started.wait(timeout=2)
 
+        pill = page.locator("#model-status")
+        page.locator("#api-key").fill("pending-startup-secret")
+        assert pill.locator("span").text_content() == "模型配置待补全"
+        page.locator("#api-key").fill("")
+        assert pill.locator("span").text_content() == "模型状态加载中"
+        assert pill.get_attribute("data-state") == "loading"
+        assert "pending-startup-secret" not in pill.text_content()
+
         page.locator("#model-api-base").fill("https://models.example.invalid/v1")
         page.locator("#api-key").fill("startup-secret")
         page.locator("#chat-model-name").fill("startup-browser-model")
-        pill = page.locator("#model-status")
         assert pill.locator("span").text_content() == "本次模型 startup-browser-model"
 
         service.release_health.set()
@@ -461,6 +468,17 @@ def test_startup_failure_preserves_completed_browser_model_status() -> None:
         assert "startup-secret" not in pill.text_content()
         assert page.locator("#query-status").text_content() == "服务处理请求时出现内部错误。"
         assert page.locator("#query-status").get_attribute("data-state") == "error"
+
+        page.locator("#chat-model-name").fill("")
+        assert pill.locator("span").text_content() == "模型配置待补全"
+        assert pill.get_attribute("data-state") == "warning"
+
+        page.locator("#model-api-base").fill("")
+        page.locator("#api-key").fill("")
+        assert pill.locator("span").text_content() == "后端状态未知"
+        assert pill.get_attribute("data-state") == "warning"
+        assert "startup-secret" not in pill.text_content()
+        assert "models.example.invalid" not in pill.text_content()
         browser.close()
 
 
