@@ -39,6 +39,7 @@ const STAGE_LABELS = {
 };
 
 const MODEL_CONFIG_ERROR = "请完整填写 API 地址、API Key 和模型名。";
+const MODEL_API_URL_ERROR = "请输入有效的模型 API 地址。";
 
 const state = {
   catalog: null,
@@ -141,7 +142,7 @@ function cacheDom() {
 function bindEvents() {
   dom.question.addEventListener("input", updateQuestionCount);
   [dom.modelApiBase, dom.apiKey, dom.chatModelName].forEach((input) => {
-    input.addEventListener("input", renderModelStatus);
+    input.addEventListener("input", handleModelConfigInput);
   });
   dom.toggleApiKey.addEventListener("click", toggleApiKeyVisibility);
   dom.runQuery.addEventListener("click", runQuery);
@@ -152,6 +153,10 @@ function bindEvents() {
   dom.sourceList.addEventListener("click", handleSourceClick);
   dom.reasoningSteps.addEventListener("click", handleSourceClick);
   dom.finalAnswer.addEventListener("click", handleSourceClick);
+  window.addEventListener("pagehide", resetBrowserModelConfig);
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) resetBrowserModelConfig();
+  });
 }
 
 function setDefaultYears() {
@@ -165,12 +170,29 @@ function updateQuestionCount() {
 
 function clearBrowserModelConfig() {
   dom.modelApiBase.value = "";
+  dom.modelApiBase.removeAttribute("aria-invalid");
   dom.apiKey.value = "";
   dom.chatModelName.value = "";
   dom.apiKey.type = "password";
   dom.toggleApiKey.setAttribute("aria-label", "显示 API Key");
   dom.toggleApiKey.setAttribute("title", "显示 API Key");
   dom.toggleApiKey.setAttribute("aria-pressed", "false");
+}
+
+function resetBrowserModelConfig() {
+  clearBrowserModelConfig();
+  if (state.modelStatus) {
+    renderModelStatus();
+  } else {
+    setStatusPill(dom.modelStatus, "error", "后端状态未知");
+  }
+}
+
+function handleModelConfigInput() {
+  if (!dom.modelApiBase.value.trim() || dom.modelApiBase.validity.valid) {
+    dom.modelApiBase.removeAttribute("aria-invalid");
+  }
+  renderModelStatus();
 }
 
 function browserModelConfig({ validate = false } = {}) {
@@ -180,6 +202,10 @@ function browserModelConfig({ validate = false } = {}) {
   const completed = [baseUrl, apiKey, modelName].map(Boolean);
   if (completed.every((value) => !value)) return null;
   if (completed.every(Boolean)) {
+    if (!dom.modelApiBase.validity.valid) {
+      if (validate) throw new Error(MODEL_API_URL_ERROR);
+      return null;
+    }
     return { base_url: baseUrl, api_key: apiKey, model_name: modelName };
   }
   if (validate) throw new Error(MODEL_CONFIG_ERROR);
@@ -190,7 +216,9 @@ function browserModelConfigState() {
   const completed = [dom.modelApiBase, dom.apiKey, dom.chatModelName].map(
     (input) => Boolean(input.value.trim())
   );
-  if (completed.every(Boolean)) return "complete";
+  if (completed.every(Boolean)) {
+    return dom.modelApiBase.validity.valid ? "complete" : "invalid";
+  }
   if (completed.some(Boolean)) return "partial";
   return "empty";
 }
@@ -227,6 +255,10 @@ function renderSystemStatus(health, kbStatus, modelStatus) {
 
 function renderModelStatus() {
   const browserState = browserModelConfigState();
+  if (browserState === "invalid") {
+    setStatusPill(dom.modelStatus, "warning", "API 地址格式有误");
+    return;
+  }
   if (browserState === "complete") {
     const config = browserModelConfig({ validate: false });
     setStatusPill(dom.modelStatus, "ready", `本次模型 ${config.model_name}`);
@@ -285,9 +317,15 @@ async function runQuery() {
   let modelConfig;
   try {
     modelConfig = browserModelConfig({ validate: true });
-  } catch {
-    setQueryStatus(MODEL_CONFIG_ERROR, "error");
-    focusFirstMissingModelField();
+  } catch (error) {
+    const invalidUrl = error.message === MODEL_API_URL_ERROR;
+    setQueryStatus(invalidUrl ? MODEL_API_URL_ERROR : MODEL_CONFIG_ERROR, "error");
+    if (invalidUrl) {
+      dom.modelApiBase.setAttribute("aria-invalid", "true");
+      dom.modelApiBase.focus();
+    } else {
+      focusFirstMissingModelField();
+    }
     return;
   }
   const question = dom.question.value.trim();
@@ -966,7 +1004,11 @@ async function refreshKbStatus() {
 
 function renderStartupFailure(error) {
   setStatusPill(dom.kbStatus, "error", "知识库连接失败");
-  setStatusPill(dom.modelStatus, "error", "后端状态未知");
+  if (browserModelConfigState() === "empty") {
+    setStatusPill(dom.modelStatus, "error", "后端状态未知");
+  } else {
+    renderModelStatus();
+  }
   setQueryStatus(error.message, "error");
   showToast(error.message);
 }
