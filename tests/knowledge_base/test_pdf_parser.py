@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pymupdf
 import pytest
+from rapidocr.utils.output import RapidOCROutput
 
 import knowledge_base.pdf_parser as pdf_parser_module
 from knowledge_base.pdf_parser import (
@@ -81,6 +82,12 @@ def test_quality_threshold_and_control_character_ratio_trigger_ocr(
     assert is_low_quality_text("valid text " + "\ufffd" * 32) is True
 
 
+@pytest.mark.parametrize("control", ["\x7f", "\x80"])
+def test_quality_threshold_counts_del_and_c1_control_characters(control: str) -> None:
+    assert is_low_quality_text("A" * 69 + control * 31) is True
+    assert is_low_quality_text("A" * 70 + control * 30) is False
+
+
 def test_parser_retains_other_pages_when_one_page_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "two-pages.pdf"
     _save_pdf(path, ["First readable page contains enough normal content for extraction.", "Second readable page contains enough normal content for extraction."])
@@ -148,6 +155,26 @@ def test_parser_distinguishes_truncated_open_failure(
     assert PDFParser().parse(path).error_code == "pdf_truncated"
 
 
+def test_parser_preserves_successful_parse_when_document_close_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "close-error.pdf"
+    path.write_bytes(b"placeholder")
+
+    class ClosingDocument:
+        is_encrypted = False
+
+        def __iter__(self):
+            return iter(())
+
+        def close(self) -> None:
+            raise RuntimeError("close failed")
+
+    monkeypatch.setattr(pdf_parser_module.pymupdf, "open", lambda _: ClosingDocument())
+
+    assert PDFParser().parse(path) == ParsedPDF("parsed", ())
+
+
 def test_ocr_failure_stays_at_page_boundary(tmp_path: Path) -> None:
     path = tmp_path / "scan.pdf"
     _save_pdf(path, [""])
@@ -192,6 +219,30 @@ def test_rapidocr_factory_initializes_once_and_joins_texts(monkeypatch: pytest.M
     assert ocr(b"png") == "first\nsecond"
     assert ocr(b"png") == "first\nsecond"
     assert len(created) == 1
+
+
+def test_rapidocr_factory_accepts_installed_rapidocr_output_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeRapidOCR:
+        def __call__(self, _: bytes) -> RapidOCROutput:
+            return RapidOCROutput(txts=("first", "", "second"))
+
+    monkeypatch.setattr(pdf_parser_module, "RapidOCR", FakeRapidOCR)
+
+    assert rapidocr_ocr_factory()(b"png") == "first\nsecond"
+
+
+def test_rapidocr_factory_accepts_legacy_result_and_elapsed_tuple(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeRapidOCR:
+        def __call__(self, _: bytes) -> tuple[list[list[object]], float]:
+            return ([[[0, 0, 1, 1], "first", 0.9], [[0, 0, 1, 1], "second", 0.8]], 0.01)
+
+    monkeypatch.setattr(pdf_parser_module, "RapidOCR", FakeRapidOCR)
+
+    assert rapidocr_ocr_factory()(b"png") == "first\nsecond"
 
 
 @pytest.mark.parametrize("output", [None, object()])

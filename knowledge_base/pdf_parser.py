@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+import unicodedata
 
 import pymupdf
 
@@ -40,7 +41,7 @@ def _bad_character_ratio(text: str) -> float:
     if not visible:
         return 1.0
     bad = sum(
-        character == "\ufffd" or (ord(character) < 32 and character not in "\t\n\r")
+        character == "\ufffd" or unicodedata.category(character) == "Cc"
         for character in visible
     )
     return bad / len(visible)
@@ -74,14 +75,7 @@ def rapidocr_ocr_factory() -> OCRCallable:
                 raise RuntimeError("RapidOCR is not installed")
             engine = RapidOCR()
         output = engine(image_bytes)  # type: ignore[operator]
-        if output is None or getattr(output, "result", None) is None:
-            return ""
-        texts = getattr(output, "txts", None) or ()
-        return "\n".join(
-            normalized
-            for value in texts
-            if (normalized := str(value).strip())
-        )
+        return _rapidocr_text(output)
 
     return ocr
 
@@ -107,14 +101,20 @@ class PDFParser:
 
         try:
             if document.is_encrypted:
-                return ParsedPDF(
+                result = ParsedPDF(
                     "failed", (), "pdf_encrypted", "PDF file is encrypted"
                 )
-            return self._parse_document(document)
+            else:
+                result = self._parse_document(document)
         except Exception:
-            return ParsedPDF("failed", (), "pdf_open_error", "Unable to read PDF file")
-        finally:
+            result = ParsedPDF("failed", (), "pdf_open_error", "Unable to read PDF file")
+        try:
             document.close()
+        except Exception:
+            if result.status in {"parsed", "partial"}:
+                return result
+            return ParsedPDF("failed", (), "pdf_close_error", "Unable to close PDF file")
+        return result
 
     def _parse_document(self, document: pymupdf.Document) -> ParsedPDF:
         pages: list[ParsedPage] = []
@@ -165,3 +165,36 @@ def _open_error_code(error: Exception) -> str:
     if "truncated" in message or "unexpected end" in message:
         return "pdf_truncated"
     return "pdf_open_error"
+
+
+def _rapidocr_text(output: object) -> str:
+    if output is None:
+        return ""
+    texts = getattr(output, "txts", None)
+    if texts is not None:
+        return _join_texts(texts)
+    if not isinstance(output, (list, tuple)):
+        return ""
+    values: object = output
+    if len(output) == 2 and isinstance(output[1], (int, float)):
+        values = output[0]
+    if not isinstance(values, (list, tuple)):
+        return ""
+    if all(isinstance(value, str) for value in values):
+        return _join_texts(values)
+    legacy_texts = [
+        row[1]
+        for row in values
+        if isinstance(row, (list, tuple)) and len(row) >= 2 and isinstance(row[1], str)
+    ]
+    return _join_texts(legacy_texts)
+
+
+def _join_texts(values: object) -> str:
+    if not isinstance(values, (list, tuple)):
+        return ""
+    return "\n".join(
+        normalized
+        for value in values
+        if isinstance(value, str) and (normalized := value.strip())
+    )
