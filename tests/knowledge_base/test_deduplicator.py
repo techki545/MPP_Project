@@ -75,6 +75,26 @@ def test_match_pdf_does_not_truncate_a_doi_to_match_a_prefix() -> None:
     assert result.method == "unmatched"
 
 
+def test_match_pdf_uses_known_doi_before_an_underscore_metadata_suffix() -> None:
+    document = _document("doc-doi", "Trial", doi="10.1000/abc")
+    lookup = DocumentLookup.from_documents((("1", document),))
+
+    result = match_pdf(Path("10.1000%2Fabc_metadata.pdf"), lookup)
+
+    assert result.document_id == "doc-doi"
+    assert result.method == "doi"
+
+
+def test_match_pdf_prefers_complete_known_underscore_doi_over_separator_candidate() -> None:
+    shorter = _document("doc-short", "Short Trial", doi="10.1000/abc")
+    longer = _document("doc-long", "Long Trial", doi="10.1000/abc_def")
+    lookup = DocumentLookup.from_documents((("1", shorter), ("2", longer)))
+
+    result = match_pdf(Path("10.1000%2Fabc_def.pdf"), lookup)
+
+    assert result.document_id == "doc-long"
+
+
 def test_match_pdf_does_not_treat_an_unmatched_doi_prefix_as_a_source_id() -> None:
     source_document = _document("doc-source", "Source Ten")
     lookup = DocumentLookup.from_documents((("10", source_document),))

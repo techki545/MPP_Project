@@ -23,7 +23,7 @@ from .models import (
 )
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _BASIC_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]")
 _SCHEMA_STATEMENTS = (
     """
@@ -191,7 +191,25 @@ class SQLiteStore:
             connection.execute("BEGIN IMMEDIATE")
             for statement in _SCHEMA_STATEMENTS:
                 connection.execute(statement)
+            previous_schema_version = self._schema_version_from_connection(connection)
+            has_existing_documents = self._has_documents(connection)
             self._migrate_document_provenance(connection)
+            if previous_schema_version < 3 and has_existing_documents:
+                connection.execute(
+                    """
+                    INSERT INTO schema_info(key, value) VALUES (?, '1')
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    ("metadata_reimport_required",),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO schema_info(key, value) VALUES (?, '0')
+                    ON CONFLICT(key) DO NOTHING
+                    """,
+                    ("metadata_reimport_required",),
+                )
             connection.execute(
                 """
                 INSERT INTO schema_info(key, value) VALUES (?, ?)
@@ -199,6 +217,18 @@ class SQLiteStore:
                 """,
                 ("schema_version", str(SCHEMA_VERSION)),
             )
+
+    @staticmethod
+    def _schema_version_from_connection(connection: sqlite3.Connection) -> int:
+        row = connection.execute(
+            "SELECT value FROM schema_info WHERE key = ?", ("schema_version",)
+        ).fetchone()
+        return int(row["value"]) if row is not None else 0
+
+    @staticmethod
+    def _has_documents(connection: sqlite3.Connection) -> bool:
+        row = connection.execute("SELECT EXISTS(SELECT 1 FROM documents)").fetchone()
+        return bool(row[0])
 
     @staticmethod
     def _migrate_document_provenance(connection: sqlite3.Connection) -> None:
@@ -229,10 +259,60 @@ class SQLiteStore:
 
     def schema_version(self) -> int:
         with self._connection() as connection:
+            return self._schema_version_from_connection(connection)
+
+    def metadata_reimport_required(self) -> bool:
+        with self._connection() as connection:
             row = connection.execute(
-                "SELECT value FROM schema_info WHERE key = ?", ("schema_version",)
+                "SELECT value FROM schema_info WHERE key = ?",
+                ("metadata_reimport_required",),
             ).fetchone()
-        return int(row["value"]) if row is not None else 0
+        return row is not None and row["value"] == "1"
+
+    def clear_metadata_reimport_required(
+        self, *, imported_row_count: int, expected_row_count: int
+    ) -> None:
+        """Clear the flag only after a full metadata reimport rebuilt all sources.
+
+        Future indexers must atomically rebuild ``document_sources`` from the full
+        metadata input, then call this method with equal imported and expected counts.
+        """
+        if (
+            isinstance(imported_row_count, bool)
+            or isinstance(expected_row_count, bool)
+            or not isinstance(imported_row_count, int)
+            or not isinstance(expected_row_count, int)
+            or imported_row_count < 0
+            or expected_row_count < 0
+        ):
+            raise KnowledgeBaseError(
+                "invalid_metadata_reimport_count",
+                "Metadata reimport counts must be non-negative integers",
+            )
+        with self._connection() as connection:
+            source_count = int(
+                connection.execute("SELECT COUNT(*) FROM document_sources").fetchone()[0]
+            )
+            if (
+                imported_row_count != expected_row_count
+                or source_count != expected_row_count
+            ):
+                raise KnowledgeBaseError(
+                    "metadata_reimport_incomplete",
+                    "Cannot clear metadata reimport flag before all source rows are rebuilt",
+                    details={
+                        "imported_row_count": imported_row_count,
+                        "expected_row_count": expected_row_count,
+                        "recorded_source_count": source_count,
+                    },
+                )
+            connection.execute(
+                """
+                INSERT INTO schema_info(key, value) VALUES (?, '0')
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                ("metadata_reimport_required",),
+            )
 
     def journal_mode(self) -> str:
         with self._connection() as connection:

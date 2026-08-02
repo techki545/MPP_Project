@@ -148,7 +148,11 @@ def match_pdf(
     filename = unquote(Path(path).stem)
 
     extracted_dois = sorted(
-        {normalize_doi(doi) for doi in _DOI_IN_FILENAME.findall(filename)},
+        {
+            candidate
+            for doi in _DOI_IN_FILENAME.findall(filename)
+            for candidate in _known_doi_candidates(doi, lookup.dois)
+        },
         key=len,
         reverse=True,
     )
@@ -207,6 +211,20 @@ def _result_for_candidates(
 
 def _filename_title(filename: str) -> str:
     return normalize_title(_FILENAME_SOURCE_PREFIX.sub("", filename))
+
+
+def _known_doi_candidates(
+    raw_doi: str, known_dois: Mapping[str, tuple[str, ...]]
+) -> tuple[str, ...]:
+    """Use only exact known DOI keys and bounded underscore filename suffixes."""
+    normalized = normalize_doi(raw_doi)
+    candidates = {normalized}
+    candidates.update(
+        normalized[:index]
+        for index, character in enumerate(normalized)
+        if character == "_"
+    )
+    return tuple(candidate for candidate in candidates if candidate in known_dois)
 
 
 def _filename_author_keys(filename: str) -> tuple[str, ...]:

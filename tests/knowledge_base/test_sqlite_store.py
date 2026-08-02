@@ -113,8 +113,9 @@ def test_shared_records_are_immutable(document: DocumentRecord):
 
 
 def test_initialize_reports_schema_version_and_wal(store: SQLiteStore):
-    assert store.schema_version() == 3
+    assert store.schema_version() == 4
     assert store.journal_mode().lower() == "wal"
+    assert store.metadata_reimport_required() is False
 
 
 def test_document_provenance_round_trip_and_source_aliases(
@@ -188,6 +189,10 @@ def test_initialize_migrates_v1_documents_with_provenance_columns(tmp_path: Path
                 has_fulltext INTEGER NOT NULL,
                 fulltext_status TEXT NOT NULL
             );
+            INSERT INTO documents VALUES (
+                'doc-1', 2, 'Trial', 'trial', '["Zhang"]', 2024, 'Journal', '', '',
+                'Abstract', 'en', 'unknown', 0.0, '', 0, 'missing'
+            );
             """
         )
 
@@ -197,7 +202,8 @@ def test_initialize_migrates_v1_documents_with_provenance_columns(tmp_path: Path
     with sqlite3.connect(path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(documents)")}
     assert {"source_id", "normalized_source_id", "url"}.issubset(columns)
-    assert store.schema_version() == 3
+    assert store.schema_version() == 4
+    assert store.metadata_reimport_required() is True
     with sqlite3.connect(path) as connection:
         tables = {
             row[0]
@@ -214,7 +220,75 @@ def test_initialize_is_idempotent_after_provenance_migration(tmp_path: Path):
     store.initialize()
     store.initialize()
 
-    assert store.schema_version() == 3
+    assert store.schema_version() == 4
+    assert store.metadata_reimport_required() is False
+
+
+def test_populated_v2_migration_marks_reimport_required_until_full_reimport(
+    tmp_path: Path,
+):
+    path = tmp_path / "manifest.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_info (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO schema_info(key, value) VALUES ('schema_version', '2');
+            CREATE TABLE documents (
+                document_id TEXT PRIMARY KEY,
+                source_row INTEGER NOT NULL,
+                source_id TEXT NOT NULL DEFAULT '',
+                normalized_source_id TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL,
+                normalized_title TEXT NOT NULL,
+                authors_json TEXT NOT NULL,
+                year INTEGER,
+                journal TEXT NOT NULL,
+                doi TEXT NOT NULL,
+                normalized_doi TEXT NOT NULL,
+                abstract TEXT NOT NULL,
+                language TEXT NOT NULL,
+                url TEXT NOT NULL DEFAULT '',
+                evidence_type TEXT NOT NULL,
+                classification_confidence REAL NOT NULL,
+                classification_basis TEXT NOT NULL,
+                has_fulltext INTEGER NOT NULL,
+                fulltext_status TEXT NOT NULL
+            );
+            INSERT INTO documents VALUES (
+                'doc-1', 2, '12', '12', 'Trial', 'trial', '["Zhang"]', 2024,
+                'Journal', '', '', 'Abstract', 'en', 'https://example.test/one',
+                'unknown', 0.0, '', 0, 'missing'
+            );
+            """
+        )
+
+    store = SQLiteStore(path)
+    store.initialize()
+
+    assert store.schema_version() == 4
+    assert store.metadata_reimport_required() is True
+    assert store.list_document_sources("doc-1") == [
+        DocumentSource("doc-1", "12", "12", 2, "https://example.test/one")
+    ]
+    with pytest.raises(KnowledgeBaseError) as exc_info:
+        store.clear_metadata_reimport_required(
+            imported_row_count=2, expected_row_count=2
+        )
+    assert exc_info.value.code == "metadata_reimport_incomplete"
+
+    # A future indexer must rebuild every source row before it clears the flag.
+    rebuilt = replace(
+        store.get_document("doc-1"),
+        source_row=3,
+        source_id="13",
+        normalized_source_id="13",
+        url="https://example.test/two",
+    )
+    store.upsert_document(rebuilt)
+    store.clear_metadata_reimport_required(imported_row_count=2, expected_row_count=2)
+    assert store.metadata_reimport_required() is False
+    store.initialize()
+    assert store.metadata_reimport_required() is False
 
 
 def test_initialize_rolls_back_schema_when_provenance_migration_fails(
@@ -237,6 +311,40 @@ def test_initialize_rolls_back_schema_when_provenance_migration_fails(
             )
         }
     assert "documents" not in tables
+    assert "document_sources" not in tables
+
+
+def test_populated_v2_migration_rollback_keeps_version_and_reimport_flag_consistent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    path = tmp_path / "manifest.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_info (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO schema_info(key, value) VALUES ('schema_version', '2');
+            CREATE TABLE documents (document_id TEXT PRIMARY KEY, source_row INTEGER NOT NULL);
+            INSERT INTO documents VALUES ('doc-1', 2);
+            """
+        )
+    store = SQLiteStore(path)
+
+    def fail_migration(connection: sqlite3.Connection) -> None:
+        raise RuntimeError("injected populated migration failure")
+
+    monkeypatch.setattr(store, "_migrate_document_provenance", fail_migration)
+    with pytest.raises(RuntimeError, match="injected populated migration failure"):
+        store.initialize()
+
+    with sqlite3.connect(path) as connection:
+        values = dict(connection.execute("SELECT key, value FROM schema_info"))
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert values == {"schema_version": "2"}
     assert "document_sources" not in tables
 
 
