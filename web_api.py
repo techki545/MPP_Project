@@ -26,6 +26,11 @@ MODEL_CONFIG_MAX_LENGTHS = {
 HOST_LABEL_CHARACTERS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
 )
+MODEL_URL_PATH_CHARACTERS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    "-._~!$&'()*+,;=:@/"
+)
+HEXADECIMAL_CHARACTERS = frozenset("0123456789abcdefABCDEF")
 
 
 class APIError(ValueError):
@@ -390,11 +395,31 @@ def _normalize_model_base_url(base_url: str) -> str:
         or parsed.fragment
     ):
         raise _invalid_model_config()
+    if not _is_valid_model_url_path(parsed.path):
+        raise _invalid_model_config()
     if not _is_valid_model_hostname(hostname):
         raise _invalid_model_config()
     if parsed.scheme.lower() == "http" and not _is_loopback_host(hostname):
         raise _invalid_model_config()
     return base_url.rstrip("/")
+
+
+def _is_valid_model_url_path(path: str) -> bool:
+    index = 0
+    while index < len(path):
+        if path[index] in MODEL_URL_PATH_CHARACTERS:
+            index += 1
+            continue
+        if (
+            path[index] == "%"
+            and index + 2 < len(path)
+            and path[index + 1] in HEXADECIMAL_CHARACTERS
+            and path[index + 2] in HEXADECIMAL_CHARACTERS
+        ):
+            index += 3
+            continue
+        return False
+    return True
 
 
 def _is_valid_model_hostname(hostname: str) -> bool:

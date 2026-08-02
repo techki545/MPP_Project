@@ -239,6 +239,84 @@ def test_invalid_model_config_error_never_serializes_api_key() -> None:
 
 
 @pytest.mark.parametrize(
+    "path",
+    [
+        "/v1%",
+        "/v1%A",
+        "/v1%ZZ",
+        "/[v1]",
+        "/\u4e2d\u6587/v1",
+        "/v1\u200b",
+    ],
+    ids=[
+        "bare-percent",
+        "single-hex-percent-escape",
+        "non-hex-percent-escape",
+        "raw-brackets",
+        "raw-unicode",
+        "unicode-format-control",
+    ],
+)
+def test_query_rejects_invalid_model_base_url_paths(path) -> None:
+    unique_api_key = "unique-api-key-must-not-leak"
+
+    with pytest.raises(APIError) as captured:
+        make_web_service(FakeKnowledgeService()).query(
+            {
+                "question": "clinical question",
+                "model_config": _valid_model_config(
+                    base_url=f"https://provider.example{path}",
+                    api_key=unique_api_key,
+                ),
+            }
+        )
+
+    serialized = json.dumps(captured.value.as_dict(), ensure_ascii=False)
+    assert captured.value.code == "invalid_model_config"
+    assert captured.value.status == 400
+    assert unique_api_key not in serialized
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("https://provider.example", "https://provider.example"),
+        ("https://provider.example/", "https://provider.example"),
+        (
+            "https://provider.example/-._~!$&'()*+,;=:@/v1/",
+            "https://provider.example/-._~!$&'()*+,;=:@/v1",
+        ),
+        (
+            "https://provider.example/%E4%B8%AD/v1",
+            "https://provider.example/%E4%B8%AD/v1",
+        ),
+        (
+            "https://provider.example/v1%2Fchat",
+            "https://provider.example/v1%2Fchat",
+        ),
+    ],
+    ids=[
+        "empty-path",
+        "root-path",
+        "allowed-raw-characters",
+        "percent-encoded-utf8",
+        "percent-encoded-slash",
+    ],
+)
+def test_query_accepts_valid_model_base_url_paths(base_url, expected) -> None:
+    knowledge_service = FakeKnowledgeService()
+
+    make_web_service(knowledge_service).query(
+        {
+            "question": "clinical question",
+            "model_config": _valid_model_config(base_url=base_url),
+        }
+    )
+
+    assert knowledge_service.received_model_config["base_url"] == expected
+
+
+@pytest.mark.parametrize(
     ("base_url", "expected"),
     [
         ("https://provider.example/v1/", "https://provider.example/v1"),
