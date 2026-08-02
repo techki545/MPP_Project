@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import ipaddress
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from graph_rag_core import EVIDENCE_ORDER, TYPE_LABELS, EvidenceGraph
 from knowledge_base.errors import KnowledgeBaseError
@@ -14,6 +16,12 @@ from knowledge_base.models import SearchFilters
 
 
 DEFAULT_CLINICAL_QUESTION = "重症支原体肺炎（SMPP）儿童是否应常规使用糖皮质激素？"
+MODEL_CONFIG_KEYS = frozenset({"base_url", "api_key", "model_name"})
+MODEL_CONFIG_MAX_LENGTHS = {
+    "base_url": 2048,
+    "api_key": 4096,
+    "model_name": 256,
+}
 
 
 class APIError(ValueError):
@@ -91,13 +99,17 @@ class GraphRAGWebService:
         if not isinstance(payload, Mapping):
             raise APIError("invalid_json", "请求体必须是 JSON 对象。")
         if any(
-            key in payload
-            for key in ("model", "api_key", "base_url", "model_name", "model_config")
+            key in payload for key in ("model", "api_key", "base_url", "model_name")
         ):
             raise APIError(
                 "client_model_config_forbidden",
                 "模型配置只能由服务器环境变量提供。",
             )
+        model_config = (
+            _parse_model_config(payload["model_config"])
+            if "model_config" in payload
+            else None
+        )
         question = " ".join(str(payload.get("question", "")).split())
         if not question:
             raise APIError("empty_question", "请输入临床问题。")
@@ -106,7 +118,10 @@ class GraphRAGWebService:
         status = self.knowledge_base_status()
         if self.knowledge_service is not None and status.get("status") == "ready":
             return self._call_knowledge(
-                self.knowledge_service.query, question, filters
+                self.knowledge_service.query,
+                question,
+                filters,
+                model_config=model_config,
             )
         return self._demo_fallback(question, filters)
 
@@ -120,8 +135,8 @@ class GraphRAGWebService:
             "question": question,
             "evidence_types": list(evidence_types or []),
         }
-        if model_config:
-            payload["model"] = dict(model_config)
+        if model_config is not None:
+            payload["model_config"] = model_config
         return self.query(payload)
 
     def document_detail(self, document_id: str) -> dict[str, Any]:
@@ -320,6 +335,58 @@ def _optional_year(value: object, name: str) -> int | None:
     if value < 1900 or value > 2100:
         raise APIError("invalid_year", f"{name} 超出允许范围。")
     return value
+
+
+def _parse_model_config(value: object) -> dict[str, str]:
+    if not isinstance(value, Mapping) or set(value) != MODEL_CONFIG_KEYS:
+        raise _invalid_model_config()
+
+    normalized: dict[str, str] = {}
+    for key, max_length in MODEL_CONFIG_MAX_LENGTHS.items():
+        raw_value = value[key]
+        if not isinstance(raw_value, str):
+            raise _invalid_model_config()
+        clean_value = raw_value.strip()
+        if not clean_value or len(clean_value) > max_length:
+            raise _invalid_model_config()
+        normalized[key] = clean_value
+
+    normalized["base_url"] = _normalize_model_base_url(normalized["base_url"])
+    return normalized
+
+
+def _normalize_model_base_url(base_url: str) -> str:
+    try:
+        parsed = urlsplit(base_url)
+        parsed.port
+    except ValueError:
+        raise _invalid_model_config() from None
+
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise _invalid_model_config()
+    if parsed.scheme.lower() == "http" and not _is_loopback_host(parsed.hostname):
+        raise _invalid_model_config()
+    return base_url.rstrip("/")
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def _invalid_model_config() -> APIError:
+    return APIError("invalid_model_config", "模型配置无效。")
 
 
 def _api_error_from_knowledge(error: KnowledgeBaseError) -> APIError:
