@@ -82,7 +82,7 @@ def test_quality_threshold_and_control_character_ratio_trigger_ocr(
     assert is_low_quality_text("valid text " + "\ufffd" * 32) is True
 
 
-@pytest.mark.parametrize("control", ["\x7f", "\x80"])
+@pytest.mark.parametrize("control", ["\x7f", "\x80", "\x85"])
 def test_quality_threshold_counts_del_and_c1_control_characters(control: str) -> None:
     assert is_low_quality_text("A" * 69 + control * 31) is True
     assert is_low_quality_text("A" * 70 + control * 30) is False

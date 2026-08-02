@@ -37,14 +37,17 @@ def _non_whitespace_count(text: str) -> int:
 
 
 def _bad_character_ratio(text: str) -> float:
-    visible = [character for character in text if not character.isspace()]
-    if not visible:
+    visible_count = 0
+    bad_count = 0
+    for character in text:
+        if character == "\ufffd" or unicodedata.category(character) == "Cc":
+            visible_count += 1
+            bad_count += 1
+        elif not character.isspace():
+            visible_count += 1
+    if visible_count == 0:
         return 1.0
-    bad = sum(
-        character == "\ufffd" or unicodedata.category(character) == "Cc"
-        for character in visible
-    )
-    return bad / len(visible)
+    return bad_count / visible_count
 
 
 def is_low_quality_text(text: str) -> bool:
