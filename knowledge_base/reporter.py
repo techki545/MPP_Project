@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import re
@@ -21,7 +22,28 @@ _EVIDENCE_TYPES = {
     "case_report",
     "unknown",
 }
+_EVIDENCE_ORDER = (
+    "guideline",
+    "systematic_review",
+    "randomized_controlled_trial",
+    "observational_study",
+    "narrative_review",
+    "case_report",
+    "unknown",
+)
+_EVIDENCE_LABELS = {
+    "guideline": "指南",
+    "systematic_review": "系统综述/Meta 分析",
+    "randomized_controlled_trial": "随机对照试验（RCT）",
+    "observational_study": "观察性研究",
+    "narrative_review": "叙述性综述",
+    "case_report": "病例报告",
+    "unknown": "未分类证据",
+}
 _DIRECTIONS = {"supports", "opposes", "uncertain"}
+_MODEL_SOURCE_LIMIT = 8
+_MODEL_SNIPPET_CHAR_LIMIT = 1600
+_MODEL_ABSTRACT_CHAR_LIMIT = 1200
 _CITATION_PATTERN = re.compile(r"\[(\d+)\]")
 _CITATION_GROUP_PATTERN = re.compile(r"(?:\s*\[\d+\])+")
 _NUMBER_PATTERN = re.compile(r"(?<![\d.])(\d+(?:\.\d+)?)(?![\d.])")
@@ -76,12 +98,17 @@ an individual clinician's judgment.
 """.strip()
 _CLAIM_EXTRACTION_PROMPT = """
 Extract only source-grounded clinical claims from the numbered evidence snippets.
-Return JSON with a claims array. Every claim must include source_number,
-source_chunk_ids, population, intervention, comparator, design, sample_size, dose,
+Return JSON with a claims array containing at most one claim per supplied source.
+Every claim must include source_number,
+source_chunk_ids, source_quote_id, population, intervention, comparator, design, sample_size, dose,
 outcome, direction (supports, opposes, or uncertain), effect_measures,
-safety_signal, limitations, statement, and source_quote. Copy source_chunk_ids
-exactly. source_quote must be present verbatim in the supplied snippets. Do not
-infer missing numbers or details.
+safety_signal, limitations, and statement. Select exactly one supplied quote_options
+item and copy its quote_id into source_quote_id and its source_chunk_id into
+source_chunk_ids. Do not return or rewrite the quote text; the server resolves it by
+ID. effect_measures and limitations must always be JSON arrays of strings; use []
+when absent. For population, intervention, comparator, design, sample_size, dose,
+outcome, and follow_up, copy an exact phrase from the selected quote or use an empty
+string when it is not reported. Do not infer missing numbers or details.
 """.strip()
 _REFINEMENT_PROMPT = """
 Classify one title/abstract into exactly one allowed evidence type: guideline,
@@ -170,6 +197,43 @@ class ValidatedClaims:
         }
 
 
+def extractive_fallback_claims(
+    sources: Sequence[EvidenceSource], *, limit: int = 8
+) -> ValidatedClaims:
+    """Create traceable, direction-neutral claims without semantic inference."""
+    claims: list[EvidenceClaim] = []
+    audit: list[dict[str, Any]] = []
+    for source in sources[: max(0, limit)]:
+        quote = next((text.strip() for text in source.snippets if text.strip()), "")
+        if not quote or not source.chunk_ids:
+            audit.append(
+                {
+                    "source_number": source.source_number,
+                    "reason": "extractive_fallback_missing_grounding",
+                }
+            )
+            continue
+        claims.append(
+            EvidenceClaim(
+                claim_id=f"fallback-{source.source_number}",
+                document_id=source.document_id,
+                evidence_type=source.evidence_type,
+                year=source.year,
+                population="",
+                intervention="",
+                comparator="",
+                outcome="相关证据发现",
+                direction="uncertain",
+                statement=_grounded_excerpt(quote),
+                source_chunk_ids=source.chunk_ids,
+                design=source.evidence_type,
+                limitations=("模型不可用时的提取式回退，未判断效应方向。",),
+                source_quote=quote,
+            )
+        )
+    return ValidatedClaims(tuple(claims), tuple(audit))
+
+
 @dataclass(frozen=True)
 class GeneratedReport:
     analysis_steps: tuple[dict[str, Any], ...]
@@ -237,7 +301,7 @@ class GroundedClaimExtractor:
             _CLAIM_EXTRACTION_PROMPT,
             {
                 "question": question,
-                "sources": [source.as_dict() for source in bundle.sources],
+                "sources": _sources_for_model(bundle.sources),
             },
         )
         raw_claims = response.get("claims") if isinstance(response, Mapping) else None
@@ -286,27 +350,24 @@ class GroundedClaimExtractor:
         source = source_lookup.get(source_number)
         if source is None:
             return None, "unknown_source_number"
-        chunk_ids = _string_tuple(raw_claim.get("source_chunk_ids"))
-        if not chunk_ids or not set(chunk_ids).issubset(set(source.chunk_ids)):
-            return None, "unknown_source_chunk"
-        direction = raw_claim.get("direction")
-        if direction not in _DIRECTIONS:
-            return None, "invalid_direction"
-        required_text = (
-            "population",
-            "intervention",
-            "design",
-            "outcome",
-            "statement",
-            "source_quote",
-        )
-        if any(
-            not isinstance(raw_claim.get(field), str)
-            or not str(raw_claim.get(field)).strip()
-            for field in required_text
-        ):
+        quote_id = _optional_text(raw_claim.get("source_quote_id"))
+        quote_option = {
+            option["quote_id"]: option for option in _quote_options(source)
+        }.get(quote_id)
+        if quote_id:
+            if quote_option is None:
+                return None, "unknown_source_quote"
+            chunk_ids = (quote_option["source_chunk_id"],)
+            source_quote = quote_option["text"]
+            statement = source_quote
+        else:
+            chunk_ids = _string_tuple(raw_claim.get("source_chunk_ids"))
+            if not chunk_ids or not set(chunk_ids).issubset(set(source.chunk_ids)):
+                return None, "unknown_source_chunk"
+            source_quote = " ".join(str(raw_claim.get("source_quote", "")).split())
+            statement = _optional_text(raw_claim.get("statement"))
+        if not statement or not source_quote:
             return None, "missing_required_text"
-        source_quote = " ".join(str(raw_claim["source_quote"]).split())
         source_text = ". ".join(
             " ".join(value.split())
             for value in (source.title, source.abstract, *source.snippets)
@@ -314,10 +375,44 @@ class GroundedClaimExtractor:
         )
         if source_quote.casefold() not in source_text.casefold():
             return None, "source_quote_not_found"
+        if quote_id:
+            cutoff = raw_claim.get("evidence_cutoff_year")
+            if isinstance(cutoff, bool) or not isinstance(cutoff, (int, type(None))):
+                cutoff = None
+            return (
+                EvidenceClaim(
+                    claim_id=f"claim-{source_number}-{index}",
+                    document_id=source.document_id,
+                    evidence_type=source.evidence_type,
+                    year=source.year,
+                    evidence_cutoff_year=cutoff,
+                    population="",
+                    intervention="",
+                    comparator="",
+                    outcome="",
+                    direction="uncertain",
+                    safety_signal=_quoted_safety_signal(source_quote) is True,
+                    design="",
+                    dose="",
+                    sample_size="",
+                    effect_measures=(),
+                    limitations=(),
+                    statement=source_quote,
+                    source_quote=source_quote,
+                    source_chunk_ids=chunk_ids,
+                    follow_up="",
+                ),
+                "",
+            )
+
+        direction = raw_claim.get("direction")
+        if direction not in _DIRECTIONS:
+            return None, "invalid_direction"
         effect_measures = _string_tuple(raw_claim.get("effect_measures"), allow_empty=True)
         limitations = _string_tuple(raw_claim.get("limitations"), allow_empty=True)
         if effect_measures is None or limitations is None:
             return None, "invalid_list_field"
+        quoted_safety_signal = _quoted_safety_signal(source_quote)
         safety_signal = raw_claim.get("safety_signal")
         if not isinstance(safety_signal, bool):
             return None, "invalid_safety_signal"
@@ -339,11 +434,8 @@ class GroundedClaimExtractor:
             if _optional_scalar(value)
         ):
             return None, "claim_not_grounded"
-        if not _claim_statement_is_grounded(
-            str(raw_claim["statement"]), source_quote
-        ):
+        if not _claim_statement_is_grounded(statement, source_quote):
             return None, "claim_not_grounded"
-        quoted_safety_signal = _quoted_safety_signal(source_quote)
         if safety_signal != (quoted_safety_signal is True):
             return None, "claim_not_grounded"
 
@@ -357,18 +449,18 @@ class GroundedClaimExtractor:
                 evidence_type=source.evidence_type,
                 year=source.year,
                 evidence_cutoff_year=cutoff,
-                population=str(raw_claim["population"]).strip(),
-                intervention=str(raw_claim["intervention"]).strip(),
+                population=_optional_text(raw_claim.get("population")),
+                intervention=_optional_text(raw_claim.get("intervention")),
                 comparator=_optional_text(raw_claim.get("comparator")),
-                outcome=str(raw_claim["outcome"]).strip(),
+                outcome=_optional_text(raw_claim.get("outcome")),
                 direction=str(direction),
                 safety_signal=safety_signal,
-                design=str(raw_claim["design"]).strip(),
+                design=_optional_text(raw_claim.get("design")),
                 dose=_optional_text(raw_claim.get("dose")),
                 sample_size=_optional_scalar(raw_claim.get("sample_size")),
                 effect_measures=effect_measures,
                 limitations=limitations,
-                statement=str(raw_claim["statement"]).strip(),
+                statement=statement,
                 source_quote=source_quote,
                 source_chunk_ids=chunk_ids,
                 follow_up=_optional_text(raw_claim.get("follow_up")),
@@ -382,11 +474,16 @@ class GroundedReporter:
         self.chat_client = chat_client
 
     def generate(self, question: str, bundle: EvidenceBundle) -> GeneratedReport:
-        response = self.chat_client.complete_json(
+        response = self._request_report(question, bundle)
+        analysis_steps, final_answer = self._validate_response(response, bundle)
+        return self._build_report(analysis_steps, final_answer, bundle)
+
+    def _request_report(self, question: str, bundle: EvidenceBundle) -> object:
+        return self.chat_client.complete_json(
             _MODEL_REPORT_PROMPT,
             {
                 "question": question,
-                "evidence_bundle": bundle.as_dict(),
+                "evidence_bundle": _bundle_for_model(bundle),
                 "required_output": {
                     "analysis_steps": [
                         {"title": "string", "body": "string", "source_ids": [1]}
@@ -395,7 +492,13 @@ class GroundedReporter:
                 },
             },
         )
-        analysis_steps, final_answer = self._validate_response(response, bundle)
+
+    def _build_report(
+        self,
+        analysis_steps: tuple[dict[str, Any], ...],
+        final_answer: str,
+        bundle: EvidenceBundle,
+    ) -> GeneratedReport:
         return GeneratedReport(
             analysis_steps=analysis_steps,
             final_answer_markdown=final_answer,
@@ -410,7 +513,30 @@ class GroundedReporter:
         self, question: str, bundle: EvidenceBundle
     ) -> GeneratedReport:
         try:
-            return self.generate(question, bundle)
+            response = self._request_report(question, bundle)
+            try:
+                analysis_steps, final_answer = self._validate_response(response, bundle)
+            except KnowledgeBaseError as error:
+                if error.code != "ungrounded_model_response":
+                    raise
+                sources = {item.source_number: item for item in bundle.sources}
+                try:
+                    analysis_steps, raw_final = self._validate_response_envelope(
+                        response, bundle
+                    )
+                except KnowledgeBaseError:
+                    if not isinstance(response, Mapping):
+                        raise
+                    raw_final = response.get("final_answer_markdown")
+                    if not isinstance(raw_final, str) or not raw_final.strip():
+                        raise
+                    analysis_steps = self._deterministic_fallback(
+                        bundle, "ungrounded_model_response"
+                    ).analysis_steps
+                final_answer = _canonicalize_report_claims(
+                    raw_final, bundle, sources
+                )
+            return self._build_report(analysis_steps, final_answer, bundle)
         except KnowledgeBaseError as error:
             code = error.code
         except Exception:
@@ -419,6 +545,17 @@ class GroundedReporter:
 
     @staticmethod
     def _validate_response(
+        response: object, bundle: EvidenceBundle
+    ) -> tuple[tuple[dict[str, Any], ...], str]:
+        validated_steps, final_answer = GroundedReporter._validate_response_envelope(
+            response, bundle
+        )
+        sources = {item.source_number: item for item in bundle.sources}
+        _validate_report_claims(final_answer, bundle, sources)
+        return validated_steps, final_answer
+
+    @staticmethod
+    def _validate_response_envelope(
         response: object, bundle: EvidenceBundle
     ) -> tuple[tuple[dict[str, Any], ...], str]:
         if not isinstance(response, Mapping):
@@ -474,7 +611,6 @@ class GroundedReporter:
         if known_numbers and not final_citations:
             raise _ungrounded()
         _validate_statistics(final_answer, final_citations, sources)
-        _validate_report_claims(final_answer, bundle, sources)
         return tuple(validated_steps), final_answer
 
     def _deterministic_fallback(
@@ -495,26 +631,77 @@ class GroundedReporter:
             if document_id in source_numbers
             for claim in claims
         ]
-        if claim_lines:
-            fallback_answer = (
-                "模型综合文本未通过可追溯性校验。以下仅列出已经通过来源校验的证据主张：\n\n"
-                + "\n".join(claim_lines)
+        counts = Counter(source.evidence_type for source in bundle.sources)
+        inventory = "、".join(
+            f"{_EVIDENCE_LABELS[evidence_type]} {counts[evidence_type]} 项"
+            for evidence_type in _EVIDENCE_ORDER
+            if counts[evidence_type]
+        ) or "没有可用证据"
+        source_ids = [source.source_number for source in bundle.sources]
+        citations = "".join(f"[{number}]" for number in source_ids)
+        dated_sources = [source for source in bundle.sources if source.year is not None]
+        if dated_sources:
+            oldest = min(dated_sources, key=lambda source: (source.year or 0, source.source_number))
+            newest = max(dated_sources, key=lambda source: (source.year or 0, -source.source_number))
+            chronology = (
+                f"检索证据的发表年份覆盖 {oldest.year} 至 {newest.year}；较新的来源包括"
+                f"《{newest.title}》[{newest.source_number}]。年份只表示时间先后，"
+                "不能单独证明新证据推翻或更新旧结论。"
             )
         else:
-            fallback_answer = (
-                "模型生成结果未通过可追溯性校验。请依据上方证据清单和关系图进行人工判断。"
+            chronology = "当前来源缺少可用发表年份，无法建立时间顺序。"
+        excerpt_lines = claim_lines or [
+            f"- 《{source.title}》[{source.source_number}]"
+            for source in bundle.sources[:8]
+        ]
+        highest_type = next(
+            (evidence_type for evidence_type in _EVIDENCE_ORDER if counts[evidence_type]),
+            "unknown",
+        )
+        fallback_answer = "\n\n".join(
+            (
+                "## 综合回答（确定性回退）",
+                (
+                    "模型服务未能完成本次语义综合。以下内容由本地程序从检索结果和原文命中片段中"
+                    "提取，仅陈列可追溯信息，不推断文献未明确表达的疗效方向。"
+                ),
+                "### 证据概况\n"
+                f"本次共纳入 {len(bundle.sources)} 项来源，包括{inventory}。{citations}",
+                "### 时间关系\n" + chronology,
+                "### 关键证据摘录\n" + "\n".join(excerpt_lines),
+                (
+                    "### 综合判断\n"
+                    f"当前证据库存的最高层级为{_EVIDENCE_LABELS[highest_type]}。"
+                    "这些来源可以形成后续人工或模型综合的证据基础，但在模型超时的情况下，"
+                    "不能仅凭检索相关性判断各研究结论是否一致，也不能据此自动给出具体治疗推荐。"
+                ),
             )
+        )
+        relation_count = len(bundle.graph.get("edges", []))
         return GeneratedReport(
             analysis_steps=(
                 {
-                    "title": "证据清单（确定性回退）",
-                    "body": body,
-                    "source_ids": [source.source_number for source in bundle.sources],
+                    "title": "第一步：检索并盘点证据库存",
+                    "body": f"本次检索得到 {len(bundle.sources)} 项来源：{inventory}。\n{body}",
+                    "source_ids": source_ids,
                 },
                 {
-                    "title": "证据关系图",
-                    "body": "已保留本次检索生成的证据节点与关系，供人工核验。",
-                    "source_ids": [],
+                    "title": "第二步：按照证据金字塔排序",
+                    "body": f"优先查看{_EVIDENCE_LABELS[highest_type]}，再使用较低层级来源补充细节。",
+                    "source_ids": source_ids,
+                },
+                {
+                    "title": "第三步：检查时间关系",
+                    "body": chronology,
+                    "source_ids": [source.source_number for source in dated_sources],
+                },
+                {
+                    "title": "第四步：形成可追溯回退判断",
+                    "body": (
+                        f"关系图保留了 {relation_count} 条可追溯关系。模型超时，"
+                        "因此不自动声称证据支持、反对或相互冲突。"
+                    ),
+                    "source_ids": source_ids[:8],
                 },
             ),
             final_answer_markdown=fallback_answer,
@@ -524,6 +711,54 @@ class GroundedReporter:
             evidence_inventory=tuple(source.as_dict() for source in bundle.sources),
             graph=dict(bundle.graph),
         )
+
+
+def _grounded_excerpt(text: str, *, limit: int = 320) -> str:
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    for index, character in enumerate(normalized[:limit], start=1):
+        if index >= 80 and character in "。！？.!?":
+            return normalized[:index]
+    return normalized[:limit].rstrip()
+
+
+def _sources_for_model(sources: Sequence[EvidenceSource]) -> list[dict[str, Any]]:
+    return [_source_for_model(source) for source in sources[:_MODEL_SOURCE_LIMIT]]
+
+
+def _source_for_model(source: EvidenceSource) -> dict[str, Any]:
+    payload = source.as_dict()
+    payload["quote_options"] = _quote_options(source)
+    payload["snippets"] = []
+    payload["abstract"] = ""
+    return payload
+
+
+def _bundle_for_model(bundle: EvidenceBundle) -> dict[str, Any]:
+    return {
+        "sources": _sources_for_model(bundle.sources),
+        "graph": dict(bundle.graph),
+    }
+
+
+def _quote_options(source: EvidenceSource) -> list[dict[str, str]]:
+    options: list[dict[str, str]] = []
+    for chunk_id, snippet in zip(source.chunk_ids, source.snippets):
+        for clause in _grounding_clauses(snippet):
+            text = " ".join(clause.split())
+            if len(text) < 16:
+                continue
+            options.append(
+                {
+                    "quote_id": f"quote-{source.source_number}-{len(options) + 1}",
+                    "source_chunk_id": chunk_id,
+                    "text": text[:360].rstrip(),
+                }
+            )
+            if len(options) == 4:
+                return options
+    return options
 
 
 def _basis_is_grounded(basis: str, title: str, abstract: str) -> bool:
@@ -596,6 +831,27 @@ def _validate_report_claims(
             raise _ungrounded()
     if not saw_claim:
         raise _ungrounded()
+
+
+def _canonicalize_report_claims(
+    text: str,
+    bundle: EvidenceBundle,
+    sources: dict[int, EvidenceSource],
+) -> str:
+    """Replace unsupported paraphrases with their cited, validated graph claims."""
+    claims_by_document = _graph_claims_by_document(bundle)
+    cited_ids = _citation_ids(text)
+    if not cited_ids or not cited_ids.issubset(sources):
+        raise _ungrounded()
+    output_lines = [
+        f"{claim['statement']}[{source_number}]"
+        for source_number in sorted(cited_ids)
+        for claim in claims_by_document.get(sources[source_number].document_id, [])
+    ]
+    output_lines = list(dict.fromkeys(output_lines))
+    if not output_lines:
+        raise _ungrounded()
+    return "\n".join(output_lines)
 
 
 def _graph_claims_by_document(

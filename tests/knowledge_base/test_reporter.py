@@ -178,6 +178,41 @@ def test_reporter_rejects_qualitative_claim_absent_from_validated_graph() -> Non
     assert captured.value.code == "ungrounded_model_response"
 
 
+def test_reporter_fallback_canonicalizes_cited_model_paraphrase() -> None:
+    response = valid_report_response()
+    response["final_answer_markdown"] = (
+        "The evidence favors low-dose methylprednisolone for shortening fever.[1]"
+    )
+
+    report = GroundedReporter(FakeChatClient(response)).generate_with_fallback(
+        "question", evidence_bundle()
+    )
+
+    assert report.model_used is True
+    assert report.model_error is None
+    assert report.analysis_steps[0]["source_ids"] == [1]
+    assert report.final_answer_markdown == (
+        "Low-dose methylprednisolone was supported for fever duration.[1]"
+    )
+
+
+def test_reporter_canonicalizes_when_reasoning_metadata_is_invalid() -> None:
+    response = valid_report_response()
+    response["analysis_steps"][0]["source_ids"] = [99]
+    response["final_answer_markdown"] = "A translated evidence summary.[1]"
+
+    report = GroundedReporter(FakeChatClient(response)).generate_with_fallback(
+        "question", evidence_bundle()
+    )
+
+    assert report.model_used is True
+    assert report.model_error is None
+    assert len(report.analysis_steps) == 4
+    assert report.final_answer_markdown == (
+        "Low-dose methylprednisolone was supported for fever duration.[1]"
+    )
+
+
 def test_reporter_rejects_uncited_qualitative_claim() -> None:
     response = valid_report_response()
     response["final_answer_markdown"] = (

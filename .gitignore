@@ -11,6 +11,7 @@ node_modules/
 .idea/
 .vscode/
 .worktrees/
+.superpowers/
 **/record/
 .local/
 *.sqlite3

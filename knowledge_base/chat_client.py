@@ -32,6 +32,7 @@ class ChatClient:
         self.model = str(model).strip()
         self._timeout = float(timeout)
         self._transport = transport or self._default_transport
+        self._terminal_error: tuple[str, str] | None = None
         if not self._api_key or not self.model or self._timeout <= 0:
             raise KnowledgeBaseError(
                 "chat_config_invalid", "Chat client configuration is invalid"
@@ -40,17 +41,24 @@ class ChatClient:
     def complete_json(
         self, system_prompt: str, user_payload: Mapping[str, Any]
     ) -> dict[str, Any]:
+        if self._terminal_error is not None:
+            code, message = self._terminal_error
+            raise KnowledgeBaseError(code, message)
         if not isinstance(system_prompt, str) or not system_prompt.strip():
             raise KnowledgeBaseError("chat_input_invalid", "Chat input is invalid")
         if not isinstance(user_payload, Mapping):
             raise KnowledgeBaseError("chat_input_invalid", "Chat input is invalid")
 
+        system_content = system_prompt.strip()
+        if "json" not in system_content.casefold():
+            system_content += "\nReturn one valid JSON object."
         payload = {
             "model": self.model,
             "temperature": 0.1,
+            "max_tokens": 4096,
             "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": system_content},
                 {
                     "role": "user",
                     "content": json.dumps(
@@ -59,6 +67,8 @@ class ChatClient:
                 },
             ],
         }
+        if self.model.casefold().startswith("deepseek-v4"):
+            payload["thinking"] = {"type": "disabled"}
         try:
             response = self._request(payload)
         except HTTPError as error:
@@ -117,8 +127,7 @@ class ChatClient:
             )
         )
 
-    @staticmethod
-    def _raise_transport_error(error: BaseException) -> None:
+    def _raise_transport_error(self, error: BaseException) -> None:
         if isinstance(error, HTTPError):
             if error.code in (401, 403):
                 code = "chat_auth_failed"
@@ -144,6 +153,7 @@ class ChatClient:
         else:
             code = "chat_unavailable"
             message = "Chat service is temporarily unavailable"
+        self._terminal_error = (code, message)
         raise KnowledgeBaseError(code, message) from None
 
     @staticmethod

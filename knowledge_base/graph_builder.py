@@ -218,6 +218,21 @@ class LocalGraphBuilder:
                         rationale="The source claim reports a supportive outcome.",
                     ),
                 )
+            if item.direction == "uncertain":
+                self._append_edge(
+                    edges,
+                    seen_edges,
+                    GraphEdge(
+                        source=item.claim_id,
+                        target=self.QUESTION_NODE_ID,
+                        relation="supplements",
+                        source_claim_ids=(item.claim_id,),
+                        rationale=(
+                            "The retrieved source contributes traceable evidence, but its "
+                            "clinical direction was not inferred."
+                        ),
+                    ),
+                )
             if item.safety_signal and item.evidence_type in _SAFETY_EVIDENCE_TYPES:
                 self._append_edge(
                     edges,
