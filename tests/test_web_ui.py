@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from playwright.sync_api import sync_playwright
 import pytest
 
@@ -10,6 +12,8 @@ class FakeWorkbenchService:
     def __init__(self, *, probe_completed: bool = False):
         self.probe_completed = probe_completed
         self.last_build_payload = None
+        self.last_query_payload = None
+        self.query_call_count = 0
 
     def health(self):
         return {
@@ -62,6 +66,8 @@ class FakeWorkbenchService:
         }
 
     def query(self, payload):
+        self.query_call_count += 1
+        self.last_query_payload = dict(payload)
         return {
             "question": payload["question"],
             "mode": "hybrid",
@@ -170,8 +176,170 @@ class FakeWorkbenchService:
         }
 
 
-def test_workbench_has_no_browser_api_key_and_renders_grounded_sources() -> None:
+def test_model_service_controls_are_accessible_and_key_starts_masked() -> None:
     with running_server(FakeWorkbenchService()) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.goto(base_url)
+
+        page.get_by_text("35,408").wait_for()
+        api_base = page.get_by_label("API 地址", exact=True)
+        api_key = page.get_by_label("API Key", exact=True)
+        model_name = page.get_by_label("模型名", exact=True)
+        toggle = page.get_by_role("button", name="显示 API Key", exact=True)
+
+        assert api_base.get_attribute("type") == "url"
+        assert api_base.get_attribute("maxlength") == "2048"
+        assert api_key.get_attribute("type") == "password"
+        assert api_key.get_attribute("maxlength") == "4096"
+        assert model_name.get_attribute("type") == "text"
+        assert model_name.get_attribute("maxlength") == "256"
+        for control in (api_base, api_key, model_name):
+            assert control.get_attribute("autocomplete") == "off"
+            assert control.get_attribute("spellcheck") == "false"
+        assert toggle.get_attribute("title") == "显示 API Key"
+        assert toggle.get_attribute("aria-pressed") == "false"
+        assert toggle.locator("svg").count() == 1
+        assert page.locator("#model-service").evaluate(
+            """section => {
+                const question = document.querySelector('.question-row');
+                const filters = document.querySelector('.query-options');
+                return Boolean(
+                    question.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING
+                ) && Boolean(
+                    section.compareDocumentPosition(filters) & Node.DOCUMENT_POSITION_FOLLOWING
+                );
+            }"""
+        )
+        assert page.evaluate(
+            "document.documentElement.scrollWidth > document.documentElement.clientWidth"
+        ) is False
+        browser.close()
+
+
+def test_complete_browser_model_config_is_trimmed_sent_and_key_can_be_revealed() -> None:
+    service = FakeWorkbenchService()
+    with running_server(service) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(base_url)
+        page.get_by_text("35,408").wait_for()
+
+        page.get_by_label("API 地址", exact=True).fill(" https://models.example.invalid/v1 ")
+        page.get_by_label("API Key", exact=True).fill(" test-secret-value ")
+        page.get_by_label("模型名", exact=True).fill(" private-chat-model ")
+
+        page.get_by_role("button", name="显示 API Key", exact=True).click()
+        toggle = page.locator("#toggle-api-key")
+        assert page.locator("#api-key").get_attribute("type") == "text"
+        assert toggle.get_attribute("aria-label") == "隐藏 API Key"
+        assert toggle.get_attribute("title") == "隐藏 API Key"
+        assert toggle.get_attribute("aria-pressed") == "true"
+
+        page.get_by_role("button", name="开始循证分析").click()
+        page.get_by_text("分析完成，共返回 1 项来源。").wait_for()
+
+        assert service.query_call_count == 1
+        assert service.last_query_payload["model_config"] == {
+            "base_url": "https://models.example.invalid/v1",
+            "api_key": "test-secret-value",
+            "model_name": "private-chat-model",
+        }
+        browser.close()
+
+
+def test_partial_browser_model_config_blocks_query_and_focuses_first_missing_field() -> None:
+    service = FakeWorkbenchService()
+    with running_server(service) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(base_url)
+        page.get_by_text("35,408").wait_for()
+
+        page.get_by_label("API Key", exact=True).fill("partial-secret-value")
+        page.get_by_label("模型名", exact=True).fill("draft-model")
+        page.get_by_role("button", name="开始循证分析").click()
+
+        assert service.query_call_count == 0
+        assert page.locator("#query-status").text_content() == (
+            "请完整填写 API 地址、API Key 和模型名。"
+        )
+        assert page.locator("#query-status").get_attribute("data-state") == "error"
+        assert page.evaluate("document.activeElement.id") == "model-api-base"
+        assert "partial-secret-value" not in page.locator("#query-status").text_content()
+        assert "partial-secret-value" not in page.locator("#toast").text_content()
+        assert page.locator("#run-query").is_enabled()
+        browser.close()
+
+
+def test_model_status_pill_tracks_browser_config_without_exposing_secrets() -> None:
+    with running_server(FakeWorkbenchService()) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(base_url)
+        page.get_by_text("模型 test-model").wait_for()
+
+        pill = page.locator("#model-status")
+        assert pill.get_attribute("data-state") == "ready"
+
+        page.locator("#api-key").fill("pill-secret-value")
+        assert pill.locator("span").text_content() == "模型配置待补全"
+        assert pill.get_attribute("data-state") == "warning"
+
+        page.locator("#model-api-base").fill("https://private.example.invalid/v1")
+        page.locator("#chat-model-name").fill("browser-model")
+        assert pill.locator("span").text_content() == "本次模型 browser-model"
+        assert pill.get_attribute("data-state") == "ready"
+        assert "pill-secret-value" not in pill.text_content()
+        assert "private.example.invalid" not in pill.text_content()
+
+        page.locator("#model-api-base").fill("")
+        page.locator("#api-key").fill("")
+        page.locator("#chat-model-name").fill("")
+        assert pill.locator("span").text_content() == "模型 test-model"
+        assert pill.get_attribute("data-state") == "ready"
+        browser.close()
+
+
+def test_browser_model_config_clears_on_reload_and_uses_no_browser_storage() -> None:
+    with running_server(FakeWorkbenchService()) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(base_url)
+        page.get_by_text("35,408").wait_for()
+
+        page.locator("#model-api-base").fill("https://models.example.invalid/v1")
+        page.locator("#api-key").fill("reload-secret-value")
+        page.locator("#chat-model-name").fill("reload-model")
+        assert page.evaluate(
+            "() => ({local: localStorage.length, session: sessionStorage.length})"
+        ) == {"local": 0, "session": 0}
+
+        page.reload()
+        page.get_by_text("35,408").wait_for()
+        assert page.locator("#model-api-base").input_value() == ""
+        assert page.locator("#api-key").input_value() == ""
+        assert page.locator("#chat-model-name").input_value() == ""
+        browser.close()
+
+    web_dir = Path(__file__).resolve().parents[1] / "web"
+    app_source = (web_dir / "app.js").read_text(encoding="utf-8")
+    index_source = (web_dir / "index.html").read_text(encoding="utf-8")
+    for forbidden in (
+        "localStorage",
+        "sessionStorage",
+        "indexedDB",
+        "document.cookie",
+        "URLSearchParams",
+        "location.search",
+    ):
+        assert forbidden not in app_source
+    assert 'type="hidden"' not in index_source
+
+
+def test_workbench_renders_grounded_sources_and_omits_empty_model_config() -> None:
+    service = FakeWorkbenchService()
+    with running_server(service) as base_url, sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page(viewport={"width": 1440, "height": 900})
         page.goto(base_url)
@@ -179,10 +347,11 @@ def test_workbench_has_no_browser_api_key_and_renders_grounded_sources() -> None
         page.get_by_text("35,408").wait_for()
         page.get_by_text("34,074").wait_for()
         page.get_by_label("临床问题").fill("SMPP儿童是否应常规使用糖皮质激素？")
-        assert page.locator("#api-key").count() == 0
         page.get_by_role("button", name="开始循证分析").click()
         page.get_by_text("第二部分：综合循证回答").wait_for()
         page.get_by_text("推荐优先采用低剂量方案").wait_for()
+        assert service.query_call_count == 1
+        assert "model_config" not in service.last_query_payload
         assert page.locator("[data-source-number='1']").count() >= 1
         assert page.locator("#evidence-graph [data-node-id]").count() == 2
 
@@ -221,7 +390,12 @@ def test_mobile_layout_has_no_horizontal_overflow_and_keeps_primary_action_visib
             "document.documentElement.scrollWidth > document.documentElement.clientWidth"
         )
         assert overflow is False
-        assert page.locator("#api-key").count() == 0
+        control_boxes = [
+            page.locator(selector).bounding_box()
+            for selector in ("#model-api-base", "#api-key", "#chat-model-name")
+        ]
+        assert all(box is not None for box in control_boxes)
+        assert control_boxes[0]["y"] < control_boxes[1]["y"] < control_boxes[2]["y"]
         browser.close()
 
 

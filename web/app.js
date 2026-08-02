@@ -38,6 +38,8 @@ const STAGE_LABELS = {
   vector: "写入向量库",
 };
 
+const MODEL_CONFIG_ERROR = "请完整填写 API 地址、API Key 和模型名。";
+
 const state = {
   catalog: null,
   kbStatus: null,
@@ -55,6 +57,7 @@ document.addEventListener("DOMContentLoaded", initialize);
 
 async function initialize() {
   cacheDom();
+  clearBrowserModelConfig();
   bindEvents();
   updateQuestionCount();
   setDefaultYears();
@@ -96,6 +99,10 @@ function cacheDom() {
     yearFrom: document.querySelector("#year-from"),
     yearTo: document.querySelector("#year-to"),
     fulltextOnly: document.querySelector("#fulltext-only"),
+    modelApiBase: document.querySelector("#model-api-base"),
+    apiKey: document.querySelector("#api-key"),
+    chatModelName: document.querySelector("#chat-model-name"),
+    toggleApiKey: document.querySelector("#toggle-api-key"),
     kbStatus: document.querySelector("#kb-status"),
     modelStatus: document.querySelector("#model-status"),
     dataSourceLabel: document.querySelector("#data-source-label"),
@@ -133,6 +140,10 @@ function cacheDom() {
 
 function bindEvents() {
   dom.question.addEventListener("input", updateQuestionCount);
+  [dom.modelApiBase, dom.apiKey, dom.chatModelName].forEach((input) => {
+    input.addEventListener("input", renderModelStatus);
+  });
+  dom.toggleApiKey.addEventListener("click", toggleApiKeyVisibility);
   dom.runQuery.addEventListener("click", runQuery);
   dom.buildKb.addEventListener("click", () => startBuild());
   dom.continueKb.addEventListener("click", continueEmbedding);
@@ -152,6 +163,55 @@ function updateQuestionCount() {
   dom.questionCount.textContent = `${dom.question.value.length} / 2000`;
 }
 
+function clearBrowserModelConfig() {
+  dom.modelApiBase.value = "";
+  dom.apiKey.value = "";
+  dom.chatModelName.value = "";
+  dom.apiKey.type = "password";
+  dom.toggleApiKey.setAttribute("aria-label", "显示 API Key");
+  dom.toggleApiKey.setAttribute("title", "显示 API Key");
+  dom.toggleApiKey.setAttribute("aria-pressed", "false");
+}
+
+function browserModelConfig({ validate = false } = {}) {
+  const baseUrl = dom.modelApiBase.value.trim();
+  const apiKey = dom.apiKey.value.trim();
+  const modelName = dom.chatModelName.value.trim();
+  const completed = [baseUrl, apiKey, modelName].map(Boolean);
+  if (completed.every((value) => !value)) return null;
+  if (completed.every(Boolean)) {
+    return { base_url: baseUrl, api_key: apiKey, model_name: modelName };
+  }
+  if (validate) throw new Error(MODEL_CONFIG_ERROR);
+  return null;
+}
+
+function browserModelConfigState() {
+  const completed = [dom.modelApiBase, dom.apiKey, dom.chatModelName].map(
+    (input) => Boolean(input.value.trim())
+  );
+  if (completed.every(Boolean)) return "complete";
+  if (completed.some(Boolean)) return "partial";
+  return "empty";
+}
+
+function focusFirstMissingModelField() {
+  const missing = [dom.modelApiBase, dom.apiKey, dom.chatModelName].find(
+    (input) => !input.value.trim()
+  );
+  if (missing) missing.focus();
+}
+
+function toggleApiKeyVisibility() {
+  const reveal = dom.apiKey.type === "password";
+  const label = reveal ? "隐藏 API Key" : "显示 API Key";
+  dom.apiKey.type = reveal ? "text" : "password";
+  dom.toggleApiKey.setAttribute("aria-label", label);
+  dom.toggleApiKey.setAttribute("title", label);
+  dom.toggleApiKey.setAttribute("aria-pressed", String(reveal));
+  dom.apiKey.focus({ preventScroll: true });
+}
+
 function renderSystemStatus(health, kbStatus, modelStatus) {
   const ready = kbStatus.status === "ready";
   setStatusPill(
@@ -159,15 +219,30 @@ function renderSystemStatus(health, kbStatus, modelStatus) {
     ready ? "ready" : "warning",
     ready ? "知识库可查询" : "知识库未构建"
   );
-  const configured = Boolean(modelStatus.configured);
-  setStatusPill(
-    dom.modelStatus,
-    configured ? "ready" : "warning",
-    configured ? `模型 ${modelStatus.chat_model || "已配置"}` : "模型未配置"
-  );
+  renderModelStatus();
   if (health.status === "degraded" && ready) {
     setStatusPill(dom.kbStatus, "warning", "知识库降级可用");
   }
+}
+
+function renderModelStatus() {
+  const browserState = browserModelConfigState();
+  if (browserState === "complete") {
+    const config = browserModelConfig({ validate: false });
+    setStatusPill(dom.modelStatus, "ready", `本次模型 ${config.model_name}`);
+    return;
+  }
+  if (browserState === "partial") {
+    setStatusPill(dom.modelStatus, "warning", "模型配置待补全");
+    return;
+  }
+  if (!state.modelStatus) return;
+  const configured = Boolean(state.modelStatus.configured);
+  setStatusPill(
+    dom.modelStatus,
+    configured ? "ready" : "warning",
+    configured ? `模型 ${state.modelStatus.chat_model || "已配置"}` : "模型未配置"
+  );
 }
 
 function setStatusPill(element, status, label) {
@@ -207,6 +282,14 @@ function renderEvidenceFilters(items) {
 }
 
 async function runQuery() {
+  let modelConfig;
+  try {
+    modelConfig = browserModelConfig({ validate: true });
+  } catch {
+    setQueryStatus(MODEL_CONFIG_ERROR, "error");
+    focusFirstMissingModelField();
+    return;
+  }
   const question = dom.question.value.trim();
   if (!question) {
     setQueryStatus("请输入临床问题。", "error");
@@ -229,6 +312,7 @@ async function runQuery() {
     year_to: yearTo,
     fulltext_only: dom.fulltextOnly.checked,
   };
+  if (modelConfig) payload.model_config = modelConfig;
 
   setQueryBusy(true);
   setQueryStatus("正在执行四路检索、证据重排与关系构建…", "loading");

@@ -171,6 +171,11 @@ button:disabled {
   background: #9da9a5;
 }
 
+.status-pill span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .status-pill[data-state="ready"] i {
   background: #45c79c;
 }
@@ -343,11 +348,82 @@ h3 {
 }
 
 .primary-command svg,
-.icon-button svg {
+.icon-button svg,
+.model-icon-button svg {
   width: 20px;
   height: 20px;
   flex: 0 0 20px;
   fill: currentColor;
+}
+
+.model-service {
+  min-width: 0;
+  margin-top: 14px;
+}
+
+.model-service h2,
+.model-control label {
+  color: #34433e;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.model-service h2 {
+  margin-bottom: 6px;
+}
+
+.model-service-fields {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.model-control {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.model-control input {
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 6px 9px;
+  color: var(--ink);
+  border: 1px solid #b9c5c1;
+  border-radius: 4px;
+  background: #ffffff;
+}
+
+.model-control input:focus {
+  border-color: var(--teal);
+}
+
+.api-key-field {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  gap: 6px;
+}
+
+.model-icon-button {
+  width: 38px;
+  height: 38px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  color: #2f4841;
+  border: 1px solid #aebeb8;
+  border-radius: 5px;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.model-icon-button:hover {
+  color: #ffffff;
+  border-color: var(--teal);
+  background: var(--teal);
 }
 
 .query-options {
@@ -1118,6 +1194,10 @@ h3 {
   .evidence-filters {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .model-service-fields {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .filter-fields {

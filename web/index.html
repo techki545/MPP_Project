@@ -50,6 +50,29 @@
           </button>
         </div>
 
+        <section id="model-service" class="model-service" aria-labelledby="model-service-title">
+          <h2 id="model-service-title">模型服务</h2>
+          <div class="model-service-fields">
+            <div class="model-control">
+              <label for="model-api-base">API 地址</label>
+              <input id="model-api-base" type="url" maxlength="2048" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="model-control">
+              <label for="api-key">API Key</label>
+              <div class="api-key-field">
+                <input id="api-key" type="password" maxlength="4096" autocomplete="off" spellcheck="false">
+                <button id="toggle-api-key" class="model-icon-button" type="button" title="显示 API Key" aria-label="显示 API Key" aria-pressed="false">
+                  <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5c5.2 0 9.3 4.5 10 6.5v1C21.3 14.5 17.2 19 12 19S2.7 14.5 2 12.5v-1C2.7 9.5 6.8 5 12 5Zm0 2c-3.7 0-6.9 2.9-7.9 5 1 2.1 4.2 5 7.9 5s6.9-2.9 7.9-5c-1-2.1-4.2-5-7.9-5Zm0 2a3 3 0 1 1 0 6 3 3 0 0 1 0-6Zm0 2a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="model-control">
+              <label for="chat-model-name">模型名</label>
+              <input id="chat-model-name" type="text" maxlength="256" autocomplete="off" spellcheck="false">
+            </div>
+          </div>
+        </section>
+
         <div class="query-options">
           <fieldset class="type-filter-group">
             <legend>证据类型</legend>
