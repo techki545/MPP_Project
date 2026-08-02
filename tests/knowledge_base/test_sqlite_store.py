@@ -107,8 +107,75 @@ def test_shared_records_are_immutable(document: DocumentRecord):
 
 
 def test_initialize_reports_schema_version_and_wal(store: SQLiteStore):
-    assert store.schema_version() == 1
+    assert store.schema_version() == 2
     assert store.journal_mode().lower() == "wal"
+
+
+def test_document_provenance_round_trip_and_source_aliases(
+    store: SQLiteStore, document: DocumentRecord
+):
+    first = replace(
+        document,
+        source_id="0012.0",
+        normalized_source_id="12",
+        url="https://example.test/first",
+    )
+    second = replace(
+        first,
+        source_id="0013",
+        normalized_source_id="13",
+        url="https://example.test/second",
+    )
+
+    store.upsert_document(first)
+    store.upsert_document(second)
+
+    assert store.get_document(document.document_id) == second
+    with sqlite3.connect(store.path) as connection:
+        aliases = connection.execute(
+            "SELECT alias, document_id, alias_type FROM document_aliases ORDER BY alias"
+        ).fetchall()
+    assert aliases == [
+        ("source_id:12", "doc-1", "source_id"),
+        ("source_id:13", "doc-1", "source_id"),
+    ]
+
+
+def test_initialize_migrates_v1_documents_with_provenance_columns(tmp_path: Path):
+    path = tmp_path / "manifest.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_info (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO schema_info(key, value) VALUES ('schema_version', '1');
+            CREATE TABLE documents (
+                document_id TEXT PRIMARY KEY,
+                source_row INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                normalized_title TEXT NOT NULL,
+                authors_json TEXT NOT NULL,
+                year INTEGER,
+                journal TEXT NOT NULL,
+                doi TEXT NOT NULL,
+                normalized_doi TEXT NOT NULL,
+                abstract TEXT NOT NULL,
+                language TEXT NOT NULL,
+                evidence_type TEXT NOT NULL,
+                classification_confidence REAL NOT NULL,
+                classification_basis TEXT NOT NULL,
+                has_fulltext INTEGER NOT NULL,
+                fulltext_status TEXT NOT NULL
+            );
+            """
+        )
+
+    store = SQLiteStore(path)
+    store.initialize()
+
+    with sqlite3.connect(path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(documents)")}
+    assert {"source_id", "normalized_source_id", "url"}.issubset(columns)
+    assert store.schema_version() == 2
 
 
 def test_embedding_cache_round_trip_is_model_scoped(store: SQLiteStore):

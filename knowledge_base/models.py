@@ -20,6 +20,9 @@ class DocumentRecord:
     classification_basis: str = ""
     has_fulltext: bool = False
     fulltext_status: str = "missing"
+    source_id: str = ""
+    normalized_source_id: str = ""
+    url: str = ""
 
 
 @dataclass(frozen=True)

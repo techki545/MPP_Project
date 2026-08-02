@@ -22,7 +22,7 @@ from .models import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _BASIC_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]")
 
 
@@ -66,6 +66,8 @@ class SQLiteStore:
                 CREATE TABLE IF NOT EXISTS documents (
                     document_id TEXT PRIMARY KEY,
                     source_row INTEGER NOT NULL,
+                    source_id TEXT NOT NULL DEFAULT '',
+                    normalized_source_id TEXT NOT NULL DEFAULT '',
                     title TEXT NOT NULL,
                     normalized_title TEXT NOT NULL,
                     authors_json TEXT NOT NULL,
@@ -75,6 +77,7 @@ class SQLiteStore:
                     normalized_doi TEXT NOT NULL,
                     abstract TEXT NOT NULL,
                     language TEXT NOT NULL,
+                    url TEXT NOT NULL DEFAULT '',
                     evidence_type TEXT NOT NULL,
                     classification_confidence REAL NOT NULL,
                     classification_basis TEXT NOT NULL,
@@ -150,6 +153,7 @@ class SQLiteStore:
                 );
                 """
             )
+            self._migrate_document_provenance(connection)
             connection.execute(
                 """
                 INSERT INTO schema_info(key, value) VALUES (?, ?)
@@ -157,6 +161,20 @@ class SQLiteStore:
                 """,
                 ("schema_version", str(SCHEMA_VERSION)),
             )
+
+    @staticmethod
+    def _migrate_document_provenance(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(documents)").fetchall()
+        }
+        for name, definition in (
+            ("source_id", "TEXT NOT NULL DEFAULT ''"),
+            ("normalized_source_id", "TEXT NOT NULL DEFAULT ''"),
+            ("url", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in columns:
+                connection.execute(f"ALTER TABLE documents ADD COLUMN {name} {definition}")
 
     def schema_version(self) -> int:
         with self._connection() as connection:
@@ -175,12 +193,14 @@ class SQLiteStore:
             connection.execute(
                 """
                 INSERT INTO documents (
-                    document_id, source_row, title, normalized_title, authors_json, year,
+                    document_id, source_row, source_id, normalized_source_id, title, normalized_title, authors_json, year,
                     journal, doi, normalized_doi, abstract, language, evidence_type,
-                    classification_confidence, classification_basis, has_fulltext, fulltext_status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    classification_confidence, classification_basis, has_fulltext, fulltext_status, url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(document_id) DO UPDATE SET
                     source_row = excluded.source_row,
+                    source_id = excluded.source_id,
+                    normalized_source_id = excluded.normalized_source_id,
                     title = excluded.title,
                     normalized_title = excluded.normalized_title,
                     authors_json = excluded.authors_json,
@@ -194,10 +214,24 @@ class SQLiteStore:
                     classification_confidence = excluded.classification_confidence,
                     classification_basis = excluded.classification_basis,
                     has_fulltext = excluded.has_fulltext,
-                    fulltext_status = excluded.fulltext_status
+                    fulltext_status = excluded.fulltext_status,
+                    url = excluded.url
                 """,
                 self._document_values(record),
             )
+            if record.normalized_source_id:
+                connection.execute(
+                    """
+                    INSERT INTO document_aliases(alias, document_id, alias_type)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(alias) DO NOTHING
+                    """,
+                    (
+                        "source_id:" + record.normalized_source_id,
+                        record.document_id,
+                        "source_id",
+                    ),
+                )
             connection.execute(
                 "DELETE FROM metadata_fts WHERE document_id = ?", (record.document_id,)
             )
@@ -634,6 +668,8 @@ class SQLiteStore:
         return (
             record.document_id,
             record.source_row,
+            record.source_id,
+            record.normalized_source_id,
             record.title,
             record.normalized_title,
             json.dumps(record.authors, ensure_ascii=False),
@@ -648,6 +684,7 @@ class SQLiteStore:
             record.classification_basis,
             int(record.has_fulltext),
             record.fulltext_status,
+            record.url,
         )
 
     @staticmethod
@@ -655,6 +692,8 @@ class SQLiteStore:
         return DocumentRecord(
             document_id=row["document_id"],
             source_row=row["source_row"],
+            source_id=row["source_id"],
+            normalized_source_id=row["normalized_source_id"],
             title=row["title"],
             normalized_title=row["normalized_title"],
             authors=tuple(json.loads(row["authors_json"])),
@@ -669,4 +708,5 @@ class SQLiteStore:
             classification_basis=row["classification_basis"],
             has_fulltext=bool(row["has_fulltext"]),
             fulltext_status=row["fulltext_status"],
+            url=row["url"],
         )

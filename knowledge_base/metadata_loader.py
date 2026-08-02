@@ -81,7 +81,11 @@ def _year(value: str) -> int | None:
 
 
 def _document_from_row(
-    row: Sequence[object], indexes: dict[str, int], source_row: int, source_id: str
+    row: Sequence[object],
+    indexes: dict[str, int],
+    source_row: int,
+    source_id: str,
+    normalized_source_id: str,
 ) -> DocumentRecord:
     authors = _authors(_cell(row, indexes, "Author"))
     year = _year(_cell(row, indexes, "Publication Year"))
@@ -107,6 +111,9 @@ def _document_from_row(
         abstract=abstract,
         language=_cell(row, indexes, "Language"),
         fulltext_status="low_information" if not title and not abstract else "missing",
+        source_id=source_id,
+        normalized_source_id=normalized_source_id,
+        url=_cell(row, indexes, "Url"),
     )
 
 
@@ -126,8 +133,11 @@ def load_csv_document_items(path: Path) -> Iterator[tuple[str, DocumentRecord]]:
         for source_row, row in enumerate(reader, start=2):
             if not any(clean_text(value) for value in row):
                 continue
-            source_id = normalize_source_id(_cell(row, indexes, "ID"))
-            yield source_id, _document_from_row(row, indexes, source_row, source_id)
+            source_id = _cell(row, indexes, "ID")
+            normalized_source_id = normalize_source_id(source_id)
+            yield normalized_source_id, _document_from_row(
+                row, indexes, source_row, source_id, normalized_source_id
+            )
 
 
 def load_csv_documents(path: Path) -> Iterator[DocumentRecord]:

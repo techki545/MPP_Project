@@ -7,10 +7,11 @@ from pathlib import Path
 import re
 from types import MappingProxyType
 from typing import TypeAlias
+import unicodedata
 from urllib.parse import unquote
 
 from .models import DocumentRecord
-from .normalization import normalize_doi, normalize_source_id, normalize_title
+from .normalization import clean_text, normalize_doi, normalize_source_id, normalize_title
 
 
 HASH_BLOCK_SIZE = 1024 * 1024
@@ -106,7 +107,7 @@ class DocumentLookup:
                 )
 
         years = {int(value) for value in _YEAR_PATTERN.findall(filename)}
-        for author in _filename_author_keys(filename_title):
+        for author in _filename_author_keys(filename):
             if years:
                 for year in years:
                     candidate_ids.update(self.year_author.get((year, author), ()))
@@ -141,13 +142,17 @@ def match_pdf(
         raise ValueError("Pass either lookup or documents_by_source_id, not both")
     filename = unquote(Path(path).stem)
 
-    for doi in _DOI_IN_FILENAME.findall(filename):
-        for candidate_doi in _doi_candidates(doi):
-            result = _result_for_candidates(
-                lookup.dois.get(candidate_doi, ()), "doi", 1.0
-            )
-            if result is not None:
-                return result
+    extracted_dois = sorted(
+        {normalize_doi(doi) for doi in _DOI_IN_FILENAME.findall(filename)},
+        key=len,
+        reverse=True,
+    )
+    for doi in extracted_dois:
+        result = _result_for_candidates(
+            lookup.dois.get(doi, ()), "doi", 1.0
+        )
+        if result is not None:
+            return result
 
     source_id_match = _SOURCE_ID_PREFIX.match(filename)
     if source_id_match is not None:
@@ -176,10 +181,8 @@ def match_pdf(
         fuzzy_matches.append((document_id, similarity))
     if fuzzy_matches:
         best_score = max(score for _, score in fuzzy_matches)
-        best_ids = tuple(
-            sorted(document_id for document_id, score in fuzzy_matches if score == best_score)
-        )
-        return _result_for_candidates(best_ids, "fuzzy_title", best_score) or MatchResult(
+        qualifying_ids = tuple(document_id for document_id, _ in fuzzy_matches)
+        return _result_for_candidates(qualifying_ids, "fuzzy_title", best_score) or MatchResult(
             None, "unmatched", 0.0
         )
 
@@ -201,19 +204,24 @@ def _filename_title(filename: str) -> str:
     return normalize_title(_FILENAME_SOURCE_PREFIX.sub("", filename))
 
 
-def _doi_candidates(raw_doi: str) -> tuple[str, ...]:
-    """Try bounded DOI suffix trims for filenames that append a human title."""
-    normalized = normalize_doi(raw_doi)
-    candidates: list[str] = []
-    for end in range(len(normalized), 7, -1):
-        candidate = normalized[:end].rstrip("-_.;()")
-        if candidate and candidate not in candidates:
-            candidates.append(candidate)
-    return tuple(candidates)
-
-
-def _filename_author_keys(filename_title: str) -> tuple[str, ...]:
-    return tuple(re.findall(r"[a-z]+", filename_title))
+def _filename_author_keys(filename: str) -> tuple[str, ...]:
+    """Build bounded author-key candidates from filename tokens, not corpus rows."""
+    normalized = unicodedata.normalize("NFKC", clean_text(filename)).lower()
+    tokens = re.findall(r"[a-z]+|[\u4e00-\u9fff]+", normalized)
+    candidates: set[str] = set()
+    for index, token in enumerate(tokens):
+        if token.isascii():
+            for end in range(index + 1, min(index + 3, len(tokens)) + 1):
+                parts = tokens[index:end]
+                if not all(part.isascii() for part in parts):
+                    break
+                candidates.add("".join(parts))
+            continue
+        maximum = min(len(token), 8)
+        for size in range(2, maximum + 1):
+            for start in range(0, len(token) - size + 1):
+                candidates.add(token[start : start + size])
+    return tuple(sorted(candidates))
 
 
 def _has_matching_year_or_author(

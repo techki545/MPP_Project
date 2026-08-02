@@ -47,11 +47,32 @@ def test_match_pdf_prefers_doi_before_source_id_and_title() -> None:
         (("12", source_document), ("99", doi_document))
     )
 
-    result = match_pdf(Path("12-10.1000%2FABC-MPP Steroid Trial.pdf"), lookup)
+    result = match_pdf(Path("12-10.1000%2FABC MPP Steroid Trial.pdf"), lookup)
 
     assert result.document_id == "doc-doi"
     assert result.method == "doi"
     assert result.confidence == 1.0
+
+
+def test_match_pdf_does_not_truncate_a_doi_to_match_a_prefix() -> None:
+    document = _document("doc-doi", "Different Trial", doi="10.1000/abc")
+    lookup = DocumentLookup.from_documents((("99", document),))
+
+    result = match_pdf(Path("10.1000%2Fabc2.pdf"), lookup)
+
+    assert result.document_id is None
+    assert result.method == "unmatched"
+
+
+def test_match_pdf_prefers_the_longest_complete_doi_in_a_filename() -> None:
+    shorter = _document("doc-short", "Short Trial", doi="10.1000/a")
+    longer = _document("doc-long", "Long Trial", doi="10.1000/abcdef")
+    lookup = DocumentLookup.from_documents((("1", shorter), ("2", longer)))
+
+    result = match_pdf(Path("10.1000%2Fa 10.1000%2Fabcdef.pdf"), lookup)
+
+    assert result.document_id == "doc-long"
+    assert result.method == "doi"
 
 
 def test_match_pdf_uses_normalized_numeric_source_id_prefix() -> None:
@@ -121,3 +142,42 @@ def test_match_pdf_never_force_matches_ambiguous_candidates() -> None:
     assert result.document_id is None
     assert result.method == "ambiguous"
     assert result.ambiguous_ids == ("doc-a", "doc-b")
+
+
+def test_match_pdf_returns_all_fuzzy_candidates_even_when_scores_differ() -> None:
+    first = _document("doc-a", "Randomized MPP Steroid Treatment Trial", 2024)
+    second = _document("doc-b", "Randomized MPP Steroid Treatment Trials", 2024)
+    lookup = DocumentLookup.from_documents((("1", first), ("2", second)))
+
+    result = match_pdf(
+        Path("Randomized MPP Steroid Treatment Tria1 2024 Zhang.pdf"), lookup
+    )
+
+    assert result.document_id is None
+    assert result.method == "ambiguous"
+    assert result.ambiguous_ids == ("doc-a", "doc-b")
+
+
+def test_author_year_blocking_uses_bounded_latin_filename_tokens() -> None:
+    target = _document(
+        "doc-target", "Different Trial", 2024, source_id="1", author="Zhang Wei"
+    )
+    distractors = tuple(
+        (str(index), _document(f"doc-{index}", f"Other study {index}", 2024, author="Other"))
+        for index in range(100)
+    )
+    lookup = DocumentLookup.from_documents(distractors + (("1", target),))
+
+    assert lookup.candidate_document_ids_for_filename("Supplement Zhang Wei 2024") == (
+        "doc-target",
+    )
+
+
+def test_author_year_blocking_uses_bounded_cjk_filename_ngrams() -> None:
+    target = _document("doc-target", "Different Trial", 2024, author="张三")
+    distractor = _document("doc-other", "Other Trial", 2024, author="李四")
+    lookup = DocumentLookup.from_documents((("1", target), ("2", distractor)))
+
+    assert lookup.candidate_document_ids_for_filename("补充材料 张三 2024") == (
+        "doc-target",
+    )

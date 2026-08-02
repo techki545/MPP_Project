@@ -44,6 +44,8 @@ def test_load_csv_ignores_blank_and_duplicate_headers_and_builds_stable_id(
     assert len(documents) == 1
     document = documents[0]
     assert document.source_row == 2
+    assert document.source_id == "0012"
+    assert document.normalized_source_id == "12"
     assert document.normalized_doi == "10.1/abc"
     assert document.document_id.startswith("doi-")
     assert document.title == "MPP Steroid Trial"
@@ -52,6 +54,7 @@ def test_load_csv_ignores_blank_and_duplicate_headers_and_builds_stable_id(
     assert document.journal == "Journal"
     assert document.abstract == "Results"
     assert document.language == "en"
+    assert document.url == "https://x"
 
 
 def test_load_csv_falls_back_to_gb18030_only_after_utf8_decode_failure(
