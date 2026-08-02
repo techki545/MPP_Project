@@ -21,6 +21,31 @@ def test_settings_resolves_source_data_and_storage_paths(tmp_path: Path):
     assert settings.sqlite_path == tmp_path / ".local" / "kb" / "manifest.sqlite3"
 
 
+@pytest.mark.parametrize("variable", ["MPP_KB_SOURCE", "MPP_KB_DATA"])
+def test_blank_path_values_use_documented_defaults(tmp_path: Path, variable: str):
+    settings = Settings.from_mapping({variable: "   "}, project_root=tmp_path)
+    defaults = Settings.from_mapping({}, project_root=tmp_path)
+
+    assert getattr(settings, variable.removeprefix("MPP_KB_").lower() + "_dir") == getattr(
+        defaults, variable.removeprefix("MPP_KB_").lower() + "_dir"
+    )
+    assert getattr(settings, variable.removeprefix("MPP_KB_").lower() + "_dir") != tmp_path
+
+
+def test_default_data_path_is_project_local(tmp_path: Path):
+    settings = Settings.from_mapping({}, project_root=tmp_path)
+
+    assert settings.data_dir == tmp_path / ".local" / "knowledge_base"
+
+
+def test_settings_repr_does_not_expose_api_key(tmp_path: Path):
+    settings = Settings.from_mapping(
+        {"MPP_API_KEY": "not-a-real-secret-for-tests"}, project_root=tmp_path
+    )
+
+    assert "not-a-real-secret-for-tests" not in repr(settings)
+
+
 def test_require_chat_access_reports_exact_missing_fields():
     settings = Settings.from_mapping({}, project_root=Path.cwd())
 
@@ -44,3 +69,25 @@ def test_embedding_access_does_not_require_chat_model():
     )
 
     settings.require_embedding_access()
+
+
+@pytest.mark.parametrize("raw_value", ["abc", "0", "-1"])
+def test_invalid_embedding_batch_size_has_stable_error(
+    raw_value: str, tmp_path: Path
+):
+    with pytest.raises(ConfigurationError) as exc_info:
+        Settings.from_mapping(
+            {"MPP_EMBEDDING_BATCH_SIZE": raw_value}, project_root=tmp_path
+        )
+
+    error = exc_info.value
+    assert error.code == "invalid_embedding_batch_size"
+    assert error.details == {"value": raw_value}
+
+
+def test_positive_embedding_batch_size_is_accepted(tmp_path: Path):
+    settings = Settings.from_mapping(
+        {"MPP_EMBEDDING_BATCH_SIZE": "64"}, project_root=tmp_path
+    )
+
+    assert settings.embedding_batch_size == 64

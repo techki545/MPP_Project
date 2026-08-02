@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
@@ -11,7 +11,7 @@ class Settings:
     source_dir: Path
     data_dir: Path
     api_base: str
-    api_key: str
+    api_key: str = field(repr=False)
     embedding_model: str
     chat_model: str
     embedding_batch_size: int = 32
@@ -29,30 +29,32 @@ class Settings:
         root = Path(project_root).resolve()
 
         def path_value(name: str, default: str) -> Path:
-            value = env.get(name, default).strip()
+            raw_value = env.get(name, "")
+            value = raw_value.strip() or default
             path = Path(value).expanduser()
             return path if path.is_absolute() else root / path
 
+        raw_batch_size = env.get("MPP_EMBEDDING_BATCH_SIZE", "32")
         try:
-            batch_size = int(env.get("MPP_EMBEDDING_BATCH_SIZE", "32").strip())
+            batch_size = int(raw_batch_size.strip())
         except ValueError as exc:
             raise ConfigurationError(
-                "embedding_batch_size_invalid",
+                "invalid_embedding_batch_size",
                 "MPP_EMBEDDING_BATCH_SIZE must be an integer",
-                {"value": env.get("MPP_EMBEDDING_BATCH_SIZE")},
+                details={"value": raw_batch_size},
             ) from exc
 
         if batch_size < 1:
             raise ConfigurationError(
-                "embedding_batch_size_invalid",
+                "invalid_embedding_batch_size",
                 "MPP_EMBEDDING_BATCH_SIZE must be positive",
-                {"value": batch_size},
+                details={"value": raw_batch_size},
             )
 
         return cls(
             project_root=root,
             source_dir=path_value("MPP_KB_SOURCE", r"C:\Users\LTC\Desktop\MPP"),
-            data_dir=path_value("MPP_KB_DATA", r".local\knowledge_base"),
+            data_dir=path_value("MPP_KB_DATA", ".local/knowledge_base"),
             api_base=env.get("MPP_API_BASE", "").strip().rstrip("/"),
             api_key=env.get("MPP_API_KEY", "").strip(),
             embedding_model=env.get(
@@ -76,7 +78,7 @@ class Settings:
             raise ConfigurationError(
                 "embedding_config_missing",
                 "Embedding configuration is incomplete",
-                {"missing": missing},
+                details={"missing": missing},
             )
 
     def require_chat_access(self) -> None:
@@ -93,5 +95,5 @@ class Settings:
             raise ConfigurationError(
                 "model_config_missing",
                 "Chat model configuration is incomplete",
-                {"missing": missing},
+                details={"missing": missing},
             )
