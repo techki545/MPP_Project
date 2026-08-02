@@ -118,6 +118,10 @@ def _valid_model_config(**overrides):
     return config
 
 
+MAX_LENGTH_HOSTNAME = ".".join(("a" * 63, "b" * 63, "c" * 63, "d" * 61))
+OVERLONG_HOSTNAME = ".".join(("a" * 63, "b" * 63, "c" * 63, "d" * 63))
+
+
 @pytest.mark.parametrize(
     "model_config",
     [
@@ -144,6 +148,20 @@ def _valid_model_config(**overrides):
         _valid_model_config(base_url="https://provider.example/v1?"),
         _valid_model_config(base_url="https://provider.example/v1#"),
         _valid_model_config(base_url="https://provider.example/v1?#"),
+        _valid_model_config(base_url="https://provider.exam\nple/v1"),
+        _valid_model_config(base_url="https://provider.exam\tple/v1"),
+        _valid_model_config(base_url="https://provider.example/v 1"),
+        _valid_model_config(base_url="https://provider.example/v\u00a01"),
+        _valid_model_config(base_url="https://provider.example/v\x001"),
+        _valid_model_config(base_url="https://provider.example/v\x7f1"),
+        _valid_model_config(base_url="https://provider.example/v1\\chat"),
+        _valid_model_config(base_url="https://bad_host.example/v1"),
+        _valid_model_config(base_url="https://example..com/v1"),
+        _valid_model_config(base_url="https://-example.com/v1"),
+        _valid_model_config(base_url="https://example-.com/v1"),
+        _valid_model_config(base_url="https://bad%host.example/v1"),
+        _valid_model_config(base_url=f"https://{'a' * 64}.example/v1"),
+        _valid_model_config(base_url=f"https://{OVERLONG_HOSTNAME}/v1"),
         _valid_model_config(base_url="https:///v1"),
         _valid_model_config(base_url="ftp://provider.example/v1"),
     ],
@@ -171,6 +189,20 @@ def _valid_model_config(**overrides):
         "bare-query-delimiter",
         "bare-fragment-delimiter",
         "bare-query-fragment-delimiters",
+        "interior-newline",
+        "interior-tab",
+        "interior-space",
+        "unicode-whitespace",
+        "ascii-control",
+        "ascii-del",
+        "backslash-confusion",
+        "underscore-host",
+        "empty-host-label",
+        "leading-hyphen-label",
+        "trailing-hyphen-label",
+        "malformed-host-text",
+        "overlong-host-label",
+        "overlong-hostname",
         "missing-hostname",
         "unsupported-scheme",
     ],
@@ -182,6 +214,7 @@ def test_query_rejects_invalid_model_config(model_config) -> None:
         )
 
     assert captured.value.code == "invalid_model_config"
+    assert captured.value.message == "模型配置无效。"
 
 
 def test_invalid_model_config_error_never_serializes_api_key() -> None:
@@ -203,21 +236,31 @@ def test_invalid_model_config_error_never_serializes_api_key() -> None:
     assert unique_api_key not in serialized
 
 
-def test_query_accepts_public_https_model_config() -> None:
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("https://provider.example/v1/", "https://provider.example/v1"),
+        ("https://例子.测试/v1/", "https://例子.测试/v1"),
+        ("https://192.0.2.1/v1/", "https://192.0.2.1/v1"),
+        ("https://[2001:db8::1]/v1/", "https://[2001:db8::1]/v1"),
+        (
+            f"https://{MAX_LENGTH_HOSTNAME}/v1/",
+            f"https://{MAX_LENGTH_HOSTNAME}/v1",
+        ),
+    ],
+    ids=["domain", "idna", "ipv4", "ipv6", "max-length-hostname"],
+)
+def test_query_accepts_valid_public_https_hosts(base_url, expected) -> None:
     knowledge_service = FakeKnowledgeService()
 
     make_web_service(knowledge_service).query(
         {
             "question": "clinical question",
-            "model_config": _valid_model_config(
-                base_url="https://provider.example/v1/"
-            ),
+            "model_config": _valid_model_config(base_url=base_url),
         }
     )
 
-    assert knowledge_service.received_model_config["base_url"] == (
-        "https://provider.example/v1"
-    )
+    assert knowledge_service.received_model_config["base_url"] == expected
 
 
 def test_query_accepts_model_config_values_at_exact_maximum_lengths() -> None:

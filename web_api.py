@@ -22,6 +22,9 @@ MODEL_CONFIG_MAX_LENGTHS = {
     "api_key": 4096,
     "model_name": 256,
 }
+HOST_LABEL_CHARACTERS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+)
 
 
 class APIError(ValueError):
@@ -360,7 +363,15 @@ def _parse_model_config(value: object) -> dict[str, str]:
 
 
 def _normalize_model_base_url(base_url: str) -> str:
-    if "?" in base_url or "#" in base_url:
+    if (
+        "?" in base_url
+        or "#" in base_url
+        or "\\" in base_url
+        or any(
+            character.isspace() or ord(character) < 32 or ord(character) == 127
+            for character in base_url
+        )
+    ):
         raise _invalid_model_config()
     try:
         parsed = urlsplit(base_url)
@@ -368,18 +379,48 @@ def _normalize_model_base_url(base_url: str) -> str:
     except ValueError:
         raise _invalid_model_config() from None
 
+    hostname = parsed.hostname
     if (
         parsed.scheme.lower() not in {"http", "https"}
-        or not parsed.hostname
+        or not hostname
         or parsed.username is not None
         or parsed.password is not None
         or parsed.query
         or parsed.fragment
     ):
         raise _invalid_model_config()
-    if parsed.scheme.lower() == "http" and not _is_loopback_host(parsed.hostname):
+    if not _is_valid_model_hostname(hostname):
+        raise _invalid_model_config()
+    if parsed.scheme.lower() == "http" and not _is_loopback_host(hostname):
         raise _invalid_model_config()
     return base_url.rstrip("/")
+
+
+def _is_valid_model_hostname(hostname: str) -> bool:
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(hostname)
+        return True
+    except ValueError:
+        pass
+
+    try:
+        ascii_hostname = hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    if len(ascii_hostname) > 253:
+        return False
+
+    labels = ascii_hostname.split(".")
+    return all(
+        label
+        and len(label) <= 63
+        and not label.startswith("-")
+        and not label.endswith("-")
+        and all(character in HOST_LABEL_CHARACTERS for character in label)
+        for label in labels
+    )
 
 
 def _is_loopback_host(hostname: str) -> bool:
