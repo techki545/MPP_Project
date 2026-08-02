@@ -23,7 +23,7 @@ from .models import (
 )
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _BASIC_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]")
 _SCHEMA_STATEMENTS = (
     """
@@ -128,6 +128,19 @@ _SCHEMA_STATEMENTS = (
         job_id TEXT PRIMARY KEY,
         state TEXT NOT NULL,
         progress_json TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS build_checkpoints (
+        stage TEXT NOT NULL,
+        record_id TEXT NOT NULL,
+        input_hash TEXT NOT NULL,
+        algorithm_version TEXT NOT NULL,
+        status TEXT NOT NULL,
+        counters_json TEXT NOT NULL,
+        error_code TEXT NOT NULL,
+        error_message TEXT NOT NULL,
+        PRIMARY KEY (stage, record_id, algorithm_version)
     )
     """,
     """
@@ -403,6 +416,27 @@ class SQLiteStore:
             ).fetchone()
         return self._document_from_row(row) if row is not None else None
 
+    def get_chunk(self, chunk_id: str) -> ChunkRecord | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM chunks WHERE chunk_id = ?", (chunk_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return ChunkRecord(
+            chunk_id=row["chunk_id"],
+            document_id=row["document_id"],
+            file_id=row["file_id"],
+            section=row["section"],
+            page_start=row["page_start"],
+            page_end=row["page_end"],
+            text=row["text"],
+            token_count=row["token_count"],
+            is_ocr=bool(row["is_ocr"]),
+            quality=row["quality"],
+            content_hash=row["content_hash"],
+        )
+
     def list_document_sources(self, document_id: str) -> list[DocumentSource]:
         with self._connection() as connection:
             rows = connection.execute(
@@ -457,6 +491,82 @@ class SQLiteStore:
                     record.error_message,
                 ),
             )
+
+    def get_file(self, file_id: str) -> FileRecord | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM files WHERE file_id = ?", (file_id,)
+            ).fetchone()
+        return self._file_from_row(row) if row is not None else None
+
+    def list_files(self, statuses: Sequence[str] | None = None) -> list[FileRecord]:
+        sql = "SELECT * FROM files"
+        parameters: tuple[str, ...] = ()
+        if statuses:
+            normalized = tuple(sorted(set(statuses)))
+            placeholders = ", ".join("?" for _ in normalized)
+            sql += f" WHERE status IN ({placeholders})"
+            parameters = normalized
+        sql += " ORDER BY path, file_id"
+        with self._connection() as connection:
+            rows = connection.execute(sql, parameters).fetchall()
+        return [self._file_from_row(row) for row in rows]
+
+    def delete_chunks_for_file(self, file_id: str) -> int:
+        with self._connection() as connection:
+            chunk_rows = connection.execute(
+                "SELECT chunk_id, document_id FROM chunks WHERE file_id = ?", (file_id,)
+            ).fetchall()
+            chunk_ids = tuple(row["chunk_id"] for row in chunk_rows)
+            document_ids = tuple(sorted({row["document_id"] for row in chunk_rows}))
+            connection.execute(
+                """
+                DELETE FROM fulltext_fts
+                WHERE chunk_id IN (
+                    SELECT chunk_id FROM chunks WHERE file_id = ?
+                )
+                """,
+                (file_id,),
+            )
+            connection.execute("DELETE FROM chunks WHERE file_id = ?", (file_id,))
+            if chunk_ids:
+                placeholders = ", ".join("?" for _ in chunk_ids)
+                connection.execute(
+                    f"DELETE FROM embedding_index_state WHERE kind = 'chunk' AND record_id IN ({placeholders})",
+                    chunk_ids,
+                )
+            for document_id in document_ids:
+                remaining = connection.execute(
+                    "SELECT 1 FROM chunks WHERE document_id = ? LIMIT 1",
+                    (document_id,),
+                ).fetchone()
+                if remaining is None:
+                    connection.execute(
+                        """
+                        UPDATE documents
+                        SET has_fulltext = 0, fulltext_status = 'missing'
+                        WHERE document_id = ?
+                        """,
+                        (document_id,),
+                    )
+        return len(chunk_ids)
+
+    def update_document_fulltext(
+        self, document_id: str, *, has_fulltext: bool, status: str
+    ) -> None:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE documents
+                SET has_fulltext = ?, fulltext_status = ?
+                WHERE document_id = ?
+                """,
+                (int(has_fulltext), status, document_id),
+            )
+            if cursor.rowcount != 1:
+                raise KnowledgeBaseError(
+                    "document_not_found", "Document record was not found"
+                )
 
     def upsert_chunk(self, record: ChunkRecord) -> None:
         with self._connection() as connection:
@@ -583,6 +693,14 @@ class SQLiteStore:
             )
         return items if limit is None else items[:limit]
 
+    def count_embedding_candidates(self) -> int:
+        with self._connection() as connection:
+            metadata_count = connection.execute(
+                "SELECT COUNT(*) FROM documents WHERE title <> '' OR abstract <> ''"
+            ).fetchone()[0]
+            chunk_count = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        return int(metadata_count) + int(chunk_count)
+
     def mark_embedding_indexed(
         self, record_id: str, kind: str, model_name: str, expected_content_hash: str
     ) -> bool:
@@ -650,6 +768,70 @@ class SQLiteStore:
             "state": row["state"],
             "progress": json.loads(row["progress_json"]),
         }
+
+    def get_build_checkpoint(
+        self, stage: str, record_id: str, algorithm_version: str
+    ) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT stage, record_id, input_hash, algorithm_version, status,
+                       counters_json, error_code, error_message
+                FROM build_checkpoints
+                WHERE stage = ? AND record_id = ? AND algorithm_version = ?
+                """,
+                (stage, record_id, algorithm_version),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "stage": row["stage"],
+            "record_id": row["record_id"],
+            "input_hash": row["input_hash"],
+            "algorithm_version": row["algorithm_version"],
+            "status": row["status"],
+            "counters": json.loads(row["counters_json"]),
+            "error_code": row["error_code"],
+            "error_message": row["error_message"],
+        }
+
+    def set_build_checkpoint(
+        self,
+        *,
+        stage: str,
+        record_id: str,
+        input_hash: str,
+        algorithm_version: str,
+        status: str,
+        counters: dict[str, int] | None = None,
+        error_code: str = "",
+        error_message: str = "",
+    ) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO build_checkpoints(
+                    stage, record_id, input_hash, algorithm_version, status,
+                    counters_json, error_code, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(stage, record_id, algorithm_version) DO UPDATE SET
+                    input_hash = excluded.input_hash,
+                    status = excluded.status,
+                    counters_json = excluded.counters_json,
+                    error_code = excluded.error_code,
+                    error_message = excluded.error_message
+                """,
+                (
+                    stage,
+                    record_id,
+                    input_hash,
+                    algorithm_version,
+                    status,
+                    json.dumps(counters or {}, ensure_ascii=False, sort_keys=True),
+                    error_code,
+                    error_message,
+                ),
+            )
 
     def record_error(self, stage: str, record_id: str, code: str, message: str) -> None:
         with self._connection() as connection:
@@ -880,4 +1062,19 @@ class SQLiteStore:
             has_fulltext=bool(row["has_fulltext"]),
             fulltext_status=row["fulltext_status"],
             url=row["url"],
+        )
+
+    @staticmethod
+    def _file_from_row(row: sqlite3.Row) -> FileRecord:
+        return FileRecord(
+            file_id=row["file_id"],
+            path=row["path"],
+            sha256=row["sha256"],
+            size_bytes=row["size_bytes"],
+            document_id=row["document_id"],
+            match_method=row["match_method"],
+            match_confidence=row["match_confidence"],
+            status=row["status"],
+            error_code=row["error_code"],
+            error_message=row["error_message"],
         )

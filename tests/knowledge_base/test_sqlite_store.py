@@ -113,7 +113,7 @@ def test_shared_records_are_immutable(document: DocumentRecord):
 
 
 def test_initialize_reports_schema_version_and_wal(store: SQLiteStore):
-    assert store.schema_version() == 4
+    assert store.schema_version() == 5
     assert store.journal_mode().lower() == "wal"
     assert store.metadata_reimport_required() is False
 
@@ -202,7 +202,7 @@ def test_initialize_migrates_v1_documents_with_provenance_columns(tmp_path: Path
     with sqlite3.connect(path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(documents)")}
     assert {"source_id", "normalized_source_id", "url"}.issubset(columns)
-    assert store.schema_version() == 4
+    assert store.schema_version() == 5
     assert store.metadata_reimport_required() is True
     with sqlite3.connect(path) as connection:
         tables = {
@@ -220,7 +220,7 @@ def test_initialize_is_idempotent_after_provenance_migration(tmp_path: Path):
     store.initialize()
     store.initialize()
 
-    assert store.schema_version() == 4
+    assert store.schema_version() == 5
     assert store.metadata_reimport_required() is False
 
 
@@ -265,7 +265,7 @@ def test_populated_v2_migration_marks_reimport_required_until_full_reimport(
     store = SQLiteStore(path)
     store.initialize()
 
-    assert store.schema_version() == 4
+    assert store.schema_version() == 5
     assert store.metadata_reimport_required() is True
     assert store.list_document_sources("doc-1") == [
         DocumentSource("doc-1", "12", "12", 2, "https://example.test/one")
