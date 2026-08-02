@@ -55,7 +55,9 @@ class Settings:
             data_dir=path_value("MPP_KB_DATA", r".local\knowledge_base"),
             api_base=env.get("MPP_API_BASE", "").strip().rstrip("/"),
             api_key=env.get("MPP_API_KEY", "").strip(),
-            embedding_model=env.get("MPP_EMBEDDING_MODEL", "").strip(),
+            embedding_model=env.get(
+                "MPP_EMBEDDING_MODEL", "text-embedding-3-large"
+            ).strip(),
             chat_model=env.get("MPP_CHAT_MODEL", "").strip(),
             embedding_batch_size=batch_size,
         )

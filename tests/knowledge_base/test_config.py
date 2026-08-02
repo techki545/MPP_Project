@@ -39,7 +39,6 @@ def test_embedding_access_does_not_require_chat_model():
         {
             "MPP_API_BASE": "https://provider.example/v1",
             "MPP_API_KEY": "local-test-secret",
-            "MPP_EMBEDDING_MODEL": "text-embedding-3-large",
         },
         project_root=Path.cwd(),
     )
