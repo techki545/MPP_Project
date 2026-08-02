@@ -175,6 +175,7 @@ class EvidenceSource:
 class EvidenceBundle:
     sources: tuple[EvidenceSource, ...]
     graph: dict[str, Any]
+    claims: tuple[EvidenceClaim, ...] = ()
 
     def __post_init__(self) -> None:
         numbers = [item.source_number for item in self.sources]
@@ -185,6 +186,7 @@ class EvidenceBundle:
         return {
             "sources": [item.as_dict() for item in self.sources],
             "graph": dict(self.graph),
+            "claims": [item.as_dict() for item in self.claims],
         }
 
 
@@ -881,6 +883,16 @@ def _graph_claims_by_document(
     bundle: EvidenceBundle,
 ) -> dict[str, list[dict[str, str]]]:
     claims_by_document: dict[str, list[dict[str, str]]] = {}
+    for claim in bundle.claims:
+        if claim.statement and claim.source_quote:
+            claims_by_document.setdefault(claim.document_id, []).append(
+                {
+                    "statement": claim.statement,
+                    "source_quote": claim.source_quote,
+                }
+            )
+    if claims_by_document:
+        return claims_by_document
     for node in bundle.graph.get("nodes", []):
         if not isinstance(node, Mapping) or node.get("node_type") != "claim":
             continue
