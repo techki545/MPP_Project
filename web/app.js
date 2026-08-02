@@ -40,6 +40,15 @@ const STAGE_LABELS = {
 
 const MODEL_CONFIG_ERROR = "请完整填写 API 地址、API Key 和模型名。";
 const MODEL_API_URL_ERROR = "请输入有效的模型 API 地址。";
+const MODEL_ERROR_MESSAGES = Object.freeze({
+  chat_auth_failed: "模型服务拒绝了 API Key，请检查令牌是否有效以及当前模型访问权限。",
+  chat_model_not_found: "模型不存在或当前令牌无权访问，请检查模型名。",
+  chat_timeout: "模型服务响应超时，请稍后重试。",
+  chat_request_rejected: "模型服务拒绝了请求，请检查 API 地址、模型名及接口兼容性。",
+  chat_unavailable: "模型服务暂时不可用，请稍后重试。",
+  chat_response_invalid: "模型响应格式无法解析，已使用确定性回退结果。",
+  model_config_missing: "未配置模型，已使用确定性回退结果。",
+});
 
 const state = {
   catalog: null,
@@ -372,8 +381,12 @@ async function runQuery() {
     renderReport(result);
     renderSources(result.sources || []);
     renderGraph(result.graph || { nodes: [], edges: [] });
-    const warning = result.warning ? ` ${result.warning}` : "";
-    setQueryStatus(`分析完成，共返回 ${result.sources?.length || 0} 项来源。${warning}`, result.warning ? "warning" : "ready");
+    const warnings = queryResultWarnings(result);
+    const warningSuffix = warnings.length ? ` ${warnings.join(" ")}` : "";
+    setQueryStatus(
+      `分析完成，共返回 ${result.sources?.length || 0} 项来源。${warningSuffix}`,
+      warnings.length ? "warning" : "ready"
+    );
     dom.dataSourceLabel.textContent = result.data_source === "demo" ? "示例证据模式" : "真实本地语料";
     dom.dataSourceLabel.dataset.mode = result.data_source || "knowledge_base";
     document.querySelector("#report-workspace").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -394,6 +407,20 @@ function setQueryBusy(busy) {
 function setQueryStatus(message, status) {
   dom.queryStatus.textContent = message;
   dom.queryStatus.dataset.state = status;
+}
+
+function modelErrorMessage(errorCode) {
+  return MODEL_ERROR_MESSAGES[errorCode] || "";
+}
+
+function queryResultWarnings(result) {
+  const modelWarning = result.model_used === false
+    ? modelErrorMessage(result.model_error)
+    : "";
+  return [...new Set([result.warning, modelWarning]
+    .filter((message) => typeof message === "string")
+    .map((message) => message.trim())
+    .filter(Boolean))];
 }
 
 function renderReport(result) {

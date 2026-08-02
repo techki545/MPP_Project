@@ -10,8 +10,9 @@ from tests.web_test_support import running_server
 
 
 class FakeWorkbenchService:
-    def __init__(self, *, probe_completed: bool = False):
+    def __init__(self, *, probe_completed: bool = False, query_overrides=None):
         self.probe_completed = probe_completed
+        self.query_overrides = dict(query_overrides or {})
         self.last_build_payload = None
         self.last_query_payload = None
         self.query_call_count = 0
@@ -69,7 +70,7 @@ class FakeWorkbenchService:
     def query(self, payload):
         self.query_call_count += 1
         self.last_query_payload = dict(payload)
-        return {
+        result = {
             "question": payload["question"],
             "mode": "hybrid",
             "degraded_reason": "",
@@ -137,6 +138,8 @@ class FakeWorkbenchService:
             "retrieval_stats": {"candidate_count": 18, "claim_count": 1},
             "data_source": "knowledge_base",
         }
+        result.update(self.query_overrides)
+        return result
 
     def document_detail(self, document_id):
         return {
@@ -542,6 +545,128 @@ def test_workbench_renders_grounded_sources_and_omits_empty_model_config() -> No
         )
         assert detail_metrics["overflowY"] == "auto"
         assert detail_metrics["scrollHeight"] > detail_metrics["clientHeight"]
+        browser.close()
+
+
+@pytest.mark.parametrize(
+    ("model_error", "expected_guidance"),
+    [
+        (
+            "chat_auth_failed",
+            "模型服务拒绝了 API Key，请检查令牌是否有效以及当前模型访问权限。",
+        ),
+        (
+            "chat_model_not_found",
+            "模型不存在或当前令牌无权访问，请检查模型名。",
+        ),
+        ("chat_timeout", "模型服务响应超时，请稍后重试。"),
+        (
+            "chat_request_rejected",
+            "模型服务拒绝了请求，请检查 API 地址、模型名及接口兼容性。",
+        ),
+        ("chat_unavailable", "模型服务暂时不可用，请稍后重试。"),
+        (
+            "chat_response_invalid",
+            "模型响应格式无法解析，已使用确定性回退结果。",
+        ),
+        (
+            "model_config_missing",
+            "未配置模型，已使用确定性回退结果。",
+        ),
+    ],
+)
+def test_model_fallback_guidance_is_secret_safe_and_report_still_renders(
+    model_error: str, expected_guidance: str
+) -> None:
+    provider_body = "unique-provider-body-must-stay-hidden"
+    service = FakeWorkbenchService(
+        query_overrides={
+            "model_used": False,
+            "model_name": None,
+            "model_error": model_error,
+            "warning": "已保留确定性回退结果。",
+            "provider_body": provider_body,
+        }
+    )
+    with running_server(service) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(base_url)
+        page.get_by_text("35,408").wait_for()
+
+        submitted_base_url = f"https://{model_error}.secret-provider.invalid/v1"
+        submitted_api_key = f"unique-submitted-secret-{model_error}"
+        page.get_by_label("API 地址", exact=True).fill(submitted_base_url)
+        page.get_by_label("API Key", exact=True).fill(submitted_api_key)
+        page.get_by_label("模型名", exact=True).fill("fallback-test-model")
+        page.get_by_role("button", name="开始循证分析").click()
+
+        page.get_by_text("推荐优先采用低剂量方案").wait_for()
+        query_status = page.locator("#query-status")
+        status_text = query_status.text_content() or ""
+        assert query_status.get_attribute("data-state") == "warning"
+        assert "已保留确定性回退结果。" in status_text
+        assert expected_guidance in status_text
+        assert "  " not in status_text
+        assert page.locator("#report-model").text_content() == "确定性回退"
+        assert page.locator("#grounding-status").text_content() == "模型结果未采用"
+        assert page.locator("#grounding-status").get_attribute("data-state") == "warning"
+
+        exposed_text = " ".join(
+            [
+                status_text,
+                page.locator("#toast").text_content() or "",
+                page.locator("#report-model").text_content() or "",
+                page.locator("#grounding-status").text_content() or "",
+            ]
+        )
+        for secret in (submitted_base_url, submitted_api_key, provider_body):
+            assert secret not in exposed_text
+        browser.close()
+
+
+def test_repeated_model_fallback_guidance_is_not_duplicated() -> None:
+    guidance = "模型服务响应超时，请稍后重试。"
+    service = FakeWorkbenchService(
+        query_overrides={
+            "model_used": False,
+            "model_error": "chat_timeout",
+            "warning": guidance,
+        }
+    )
+    with running_server(service) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(base_url)
+        page.get_by_text("35,408").wait_for()
+        page.get_by_role("button", name="开始循证分析").click()
+
+        page.get_by_text("推荐优先采用低剂量方案").wait_for()
+        status_text = page.locator("#query-status").text_content() or ""
+        assert status_text.count(guidance) == 1
+        assert page.locator("#query-status").get_attribute("data-state") == "warning"
+        browser.close()
+
+
+def test_unknown_model_error_does_not_invent_provider_guidance() -> None:
+    service = FakeWorkbenchService(
+        query_overrides={
+            "model_used": False,
+            "model_error": "retrieval_policy_fallback",
+            "warning": None,
+        }
+    )
+    with running_server(service) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(base_url)
+        page.get_by_text("35,408").wait_for()
+        page.get_by_role("button", name="开始循证分析").click()
+
+        page.get_by_text("推荐优先采用低剂量方案").wait_for()
+        assert page.locator("#query-status").text_content() == "分析完成，共返回 1 项来源。"
+        assert page.locator("#query-status").get_attribute("data-state") == "ready"
+        assert page.locator("#report-model").text_content() == "确定性回退"
         browser.close()
 
 

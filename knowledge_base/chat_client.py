@@ -123,19 +123,36 @@ class ChatClient:
             if error.code in (401, 403):
                 code = "chat_auth_failed"
                 message = "Chat authentication failed"
+            elif error.code == 404:
+                code = "chat_model_not_found"
+                message = "Chat model was not found"
+            elif error.code == 408:
+                code = "chat_timeout"
+                message = "Chat request timed out"
             elif error.code == 400:
                 code = "chat_request_rejected"
                 message = "Chat request was rejected"
-            elif error.code in (408, 409, 429) or 500 <= error.code <= 599:
+            elif error.code in (409, 429) or 500 <= error.code <= 599:
                 code = "chat_unavailable"
                 message = "Chat service is temporarily unavailable"
             else:
                 code = "chat_request_rejected"
                 message = "Chat request was rejected"
+        elif ChatClient._is_timeout_error(error):
+            code = "chat_timeout"
+            message = "Chat request timed out"
         else:
             code = "chat_unavailable"
             message = "Chat service is temporarily unavailable"
         raise KnowledgeBaseError(code, message) from None
+
+    @staticmethod
+    def _is_timeout_error(error: BaseException) -> bool:
+        if isinstance(error, (TimeoutError, socket.timeout)):
+            return True
+        if isinstance(error, URLError) and isinstance(error.reason, BaseException):
+            return ChatClient._is_timeout_error(error.reason)
+        return False
 
     @staticmethod
     def _parse_response(response: Mapping[str, Any]) -> dict[str, Any]:

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from io import BytesIO
 import json
-from urllib.error import HTTPError
+import socket
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -58,28 +59,81 @@ def test_response_format_is_retried_only_when_provider_explicitly_rejects_it() -
 
 @pytest.mark.parametrize(
     ("status", "expected"),
-    [(401, "chat_auth_failed"), (403, "chat_auth_failed"), (500, "chat_unavailable")],
+    [
+        (401, "chat_auth_failed"),
+        (403, "chat_auth_failed"),
+        (404, "chat_model_not_found"),
+        (408, "chat_timeout"),
+        (409, "chat_unavailable"),
+        (429, "chat_unavailable"),
+        (500, "chat_unavailable"),
+    ],
 )
 def test_http_failures_are_stably_mapped_without_exposing_provider_body(
     status: int, expected: str
 ) -> None:
+    base_url = "https://private-provider-url.example/v1"
+    api_key = "unique-api-key-value"
+
     def transport(url, headers, payload, timeout):
         raise HTTPError(
             url,
             status,
-            "failure",
+            "unique-provider-exception-text",
             {},
-            BytesIO(b"secret upstream response body"),
+            BytesIO(b"unique provider response body"),
         )
 
     with pytest.raises(KnowledgeBaseError) as captured:
         ChatClient(
-            "https://provider.example/v1", "secret-key", "chat-model", transport=transport
+            base_url, api_key, "chat-model", transport=transport
         ).complete_json("system", {"task": "probe"})
 
     assert captured.value.code == expected
-    assert "secret" not in str(captured.value).casefold()
     assert captured.value.details == {}
+    exposed = f"{captured.value!s} {captured.value!r}"
+    for secret in (
+        base_url,
+        api_key,
+        "unique-provider-exception-text",
+        "unique provider response body",
+    ):
+        assert secret not in exposed
+
+
+@pytest.mark.parametrize(
+    ("transport_error", "expected"),
+    [
+        (TimeoutError("unique direct timeout text"), "chat_timeout"),
+        (socket.timeout("unique socket timeout text"), "chat_timeout"),
+        (URLError(socket.timeout("unique nested timeout text")), "chat_timeout"),
+        (URLError("unique network failure text"), "chat_unavailable"),
+    ],
+    ids=["direct-timeout", "socket-timeout", "urlerror-timeout", "urlerror-network"],
+)
+def test_transport_failures_are_stably_mapped_without_exposing_exception_text(
+    transport_error: BaseException, expected: str
+) -> None:
+    def transport(url, headers, payload, timeout):
+        raise transport_error
+
+    with pytest.raises(KnowledgeBaseError) as captured:
+        ChatClient(
+            "https://unique-network-url.example/v1",
+            "unique-network-api-key",
+            "chat-model",
+            transport=transport,
+        ).complete_json("system", {"task": "probe"})
+
+    assert captured.value.code == expected
+    assert captured.value.details == {}
+    exposed = f"{captured.value!s} {captured.value!r}"
+    for secret in (
+        "unique-network-url.example",
+        "unique-network-api-key",
+        str(transport_error),
+    ):
+        assert secret not in exposed
 
 
 def test_generic_bad_request_is_not_retried() -> None:
