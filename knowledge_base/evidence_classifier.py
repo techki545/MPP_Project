@@ -79,6 +79,7 @@ _TYPE_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
             r"横断面研究",
             r"观察性研究",
             r"回顾性研究",
+            r"回顾性分析",
         ),
     ),
     (
@@ -110,6 +111,14 @@ _ABSTRACT_RCT_DESIGN_PATTERNS = (
     r"\bmulticent(?:er|re)[ -]randomi[sz]ed controlled trial\b",
     r"采用随机对照(?:试验|研究)",
     r"随机分配(?:至|到|为)",
+    r"随机(?:数字表|硬币投掷|抽签)(?:法)?.{0,12}分(?:为|组)",
+)
+
+_SECONDARY_REVIEW_TITLE_PATTERNS = (
+    r"研究进展",
+    r"进展综述",
+    r"指南.{0,20}(?:解读|述评)",
+    r"(?:重点|专家)解读",
 )
 
 
@@ -137,7 +146,8 @@ def classify_evidence(
         confidence = 1.0
         basis = f"publication_type:{matched_pattern}"
     else:
-        title_match = _match_type(normalized_title)
+        secondary_review_match = _match_secondary_review_title(normalized_title)
+        title_match = secondary_review_match or _match_type(normalized_title)
         if title_match is not None:
             evidence_type, matched_pattern = title_match
             confidence = 0.9
@@ -173,6 +183,13 @@ def _match_type(text: str) -> tuple[str, str] | None:
         for pattern in patterns:
             if re.search(pattern, text, flags=re.IGNORECASE):
                 return evidence_type, pattern
+    return None
+
+
+def _match_secondary_review_title(text: str) -> tuple[str, str] | None:
+    for pattern in _SECONDARY_REVIEW_TITLE_PATTERNS:
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            return "narrative_review", pattern
     return None
 
 

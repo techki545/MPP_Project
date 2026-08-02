@@ -1070,7 +1070,8 @@ class SQLiteStore:
         if fulltext:
             sql = f"""
                 SELECT fulltext_fts.chunk_id, fulltext_fts.document_id,
-                       c.section, c.text, bm25(fulltext_fts) AS score
+                       c.section, c.page_start, c.page_end, c.text,
+                       bm25(fulltext_fts) AS score
                 FROM fulltext_fts
                 JOIN chunks AS c ON c.chunk_id = fulltext_fts.chunk_id
                 JOIN documents AS d ON d.document_id = fulltext_fts.document_id
@@ -1101,7 +1102,11 @@ class SQLiteStore:
                     rank=index,
                     score=float(row["score"]),
                     text=row["text"],
-                    payload={"section": row["section"]},
+                    payload={
+                        "section": row["section"],
+                        "page_start": row["page_start"],
+                        "page_end": row["page_end"],
+                    },
                 )
                 for index, row in enumerate(rows, start=1)
             ]

@@ -50,6 +50,26 @@ def test_abstract_only_design_has_lower_confidence() -> None:
     assert "multicenter_randomization" in assessment.quality_signals
 
 
+def test_chinese_random_number_table_is_classified_as_randomized_trial() -> None:
+    assessment = classify_evidence(
+        "不同剂量甲泼尼龙的疗效比较",
+        "纳入104例患儿，采用随机数字表法分为低、中、高剂量三组。",
+    )
+
+    assert assessment.evidence_type == "randomized_controlled_trial"
+    assert assessment.confidence == 0.7
+
+
+def test_chinese_retrospective_analysis_is_classified_as_observational() -> None:
+    assessment = classify_evidence(
+        "儿童难治性肺炎支原体肺炎临床特点分析",
+        "回顾性分析109例患儿的病程、实验室指标及影像学表现。",
+    )
+
+    assert assessment.evidence_type == "observational_study"
+    assert assessment.confidence == 0.7
+
+
 def test_reference_to_previous_rcts_is_not_classified_as_an_rct() -> None:
     assessment = classify_evidence(
         "Current treatment options",
@@ -57,6 +77,23 @@ def test_reference_to_previous_rcts_is_not_classified_as_an_rct() -> None:
     )
 
     assert assessment.evidence_type != "randomized_controlled_trial"
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "儿童肺炎支原体耐药现状及抗菌药物治疗的研究进展",
+        "《儿童肺炎支原体肺炎诊治指南》重点解读",
+    ],
+)
+def test_secondary_review_titles_are_not_promoted_to_guidelines(title: str) -> None:
+    assessment = classify_evidence(
+        title,
+        "大环内酯类抗菌药物是目前国内外指南推荐的首选药物。",
+    )
+
+    assert assessment.evidence_type == "narrative_review"
+    assert assessment.confidence == 0.9
 
 
 def test_unknown_classification_does_not_invent_quality() -> None:

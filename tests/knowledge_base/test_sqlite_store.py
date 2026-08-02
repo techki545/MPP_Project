@@ -105,6 +105,8 @@ def test_document_file_chunk_round_trip_and_chinese_fts_search(
     hits = store.search_fulltext("低剂量 高剂量", 5)
     assert [(hit.record_id, hit.document_id) for hit in hits] == [("chunk-1", "doc-1")]
     assert hits[0].text == chunk.text
+    assert hits[0].payload["page_start"] == 2
+    assert hits[0].payload["page_end"] == 3
 
 
 def test_document_chunks_and_service_statistics_are_available(
