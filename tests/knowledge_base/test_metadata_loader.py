@@ -1,8 +1,10 @@
 from pathlib import Path
 
 from openpyxl import Workbook
+import pytest
 
 from knowledge_base.metadata_loader import (
+    CsvDecodeWarning,
     load_csv_document_items,
     load_csv_documents,
     load_download_flags,
@@ -84,10 +86,53 @@ def test_load_csv_keeps_rows_with_an_isolated_invalid_byte_in_gb18030_export(
     ).encode("gb18030")
     csv_path.write_bytes(content.replace("摘要内容".encode("gb18030"), b"\x80"))
 
-    document = next(iter(load_csv_documents(csv_path)))
+    diagnostics = []
+    document = list(load_csv_documents(csv_path, diagnostics=diagnostics))[0]
 
     assert document.title == "儿童支原体肺炎"
     assert document.abstract == "�"
+    assert diagnostics[0].affected_rows == (2,)
+    assert diagnostics[0].replacement_count == 1
+    assert diagnostics[0].omitted_row_count == 0
+
+
+def test_load_csv_bounds_gb18030_replacement_diagnostic_rows(tmp_path: Path) -> None:
+    csv_path = tmp_path / "metadata-many-corrupt-gb.csv"
+    content = (
+        "ID,Author,Publication Year,Title,Publication Title,DOI,Url,Abstract Note,Language\n"
+        "8,Li,2024,儿童支原体肺炎,医学期刊,,,摘要内容,zh\n"
+        "9,Li,2024,儿童支原体肺炎,医学期刊,,,摘要内容,zh\n"
+        "10,Li,2024,儿童支原体肺炎,医学期刊,,,摘要内容,zh\n"
+    ).encode("gb18030")
+    csv_path.write_bytes(content.replace("摘要内容".encode("gb18030"), b"\x80"))
+
+    diagnostics = []
+    documents = list(
+        load_csv_documents(csv_path, diagnostics=diagnostics, max_diagnostic_rows=2)
+    )
+
+    assert len(documents) == 3
+    assert diagnostics[0].affected_rows == (2, 3)
+    assert diagnostics[0].replacement_count == 3
+    assert diagnostics[0].omitted_row_count == 1
+
+
+def test_load_csv_emits_one_bounded_warning_without_diagnostic_container(
+    tmp_path: Path,
+) -> None:
+    csv_path = tmp_path / "metadata-warning-gb.csv"
+    content = (
+        "ID,Title,Abstract Note\n"
+        "8,儿童支原体肺炎,摘要内容\n"
+        "9,儿童支原体肺炎,摘要内容\n"
+    ).encode("gb18030")
+    csv_path.write_bytes(content.replace("摘要内容".encode("gb18030"), b"\x80"))
+
+    with pytest.warns(CsvDecodeWarning) as caught:
+        documents = list(load_csv_documents(csv_path))
+
+    assert len(documents) == 2
+    assert len(caught) == 1
 
 
 def test_low_information_csv_rows_are_retained_but_marked_not_embeddable(

@@ -15,8 +15,11 @@ from .normalization import clean_text, normalize_doi, normalize_source_id, norma
 
 
 HASH_BLOCK_SIZE = 1024 * 1024
-_DOI_IN_FILENAME = re.compile(r"(10\.\d{4,9}/[-._;()/:a-z0-9]+)", re.IGNORECASE)
-_SOURCE_ID_PREFIX = re.compile(r"^\s*(\d+)(?=$|[\s_.-])")
+_DOI_IN_FILENAME = re.compile(
+    r"(?<![0-9a-z])(10\.\d{4,9}/[-._;()/:a-z0-9]+)", re.IGNORECASE
+)
+_DOI_FILENAME_PREFIX = re.compile(r"^\s*10\.\d", re.IGNORECASE)
+_SOURCE_ID_PREFIX = re.compile(r"^\s*(\d+)(?=$|[\s_.-]|[\u4e00-\u9fff])")
 _FILENAME_SOURCE_PREFIX = re.compile(r"^\s*\d+(?:[\s_.-]+)")
 _YEAR_PATTERN = re.compile(r"(?:19|20)\d{2}")
 _PREFIX_LENGTHS = (8, 12, 16, 24)
@@ -120,6 +123,8 @@ def hash_file(path: Path, block_size: int = HASH_BLOCK_SIZE) -> str:
     """Return a SHA256 digest while reading at most one MiB per default block."""
     import hashlib
 
+    if isinstance(block_size, bool) or not isinstance(block_size, int) or block_size <= 0:
+        raise ValueError("block_size must be positive")
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
         while block := handle.read(block_size):
@@ -155,7 +160,7 @@ def match_pdf(
             return result
 
     source_id_match = _SOURCE_ID_PREFIX.match(filename)
-    if source_id_match is not None:
+    if source_id_match is not None and _DOI_FILENAME_PREFIX.match(filename) is None:
         result = _result_for_candidates(
             lookup.source_ids.get(normalize_source_id(source_id_match.group(1)), ()),
             "source_id",

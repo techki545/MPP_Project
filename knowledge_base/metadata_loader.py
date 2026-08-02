@@ -3,8 +3,10 @@ from __future__ import annotations
 import csv
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 import re
+import warnings
 
 from openpyxl import load_workbook
 
@@ -32,6 +34,20 @@ _CSV_COLUMNS = (
 _DOWNLOAD_FLAG_HEADERS = frozenset({"是否下载", "下载"})
 _SOURCE_ID_HEADERS = frozenset({"id", "source id", "source_id", "item id", "item_id"})
 _YEAR_PATTERN = re.compile(r"(?:19|20)\d{2}")
+DEFAULT_MAX_DIAGNOSTIC_ROWS = 20
+
+
+@dataclass(frozen=True)
+class CsvDecodeDiagnostics:
+    path: Path
+    encoding: str
+    affected_rows: tuple[int, ...]
+    replacement_count: int
+    omitted_row_count: int
+
+
+class CsvDecodeWarning(UserWarning):
+    pass
 
 
 def _select_csv_encoding(path: Path) -> str:
@@ -117,13 +133,23 @@ def _document_from_row(
     )
 
 
-def load_csv_document_items(path: Path) -> Iterator[tuple[str, DocumentRecord]]:
+def load_csv_document_items(
+    path: Path,
+    *,
+    diagnostics: list[CsvDecodeDiagnostics] | None = None,
+    max_diagnostic_rows: int = DEFAULT_MAX_DIAGNOSTIC_ROWS,
+) -> Iterator[tuple[str, DocumentRecord]]:
     """Stream normalized source IDs with their Zotero-style metadata records."""
+    if max_diagnostic_rows < 0:
+        raise ValueError("max_diagnostic_rows must not be negative")
     path = Path(path)
     encoding = _select_csv_encoding(path)
     # Some legacy exports are overwhelmingly gb18030 with isolated bad bytes.
     # The fallback stays gb18030 and replaces only those malformed byte sequences.
     errors = "replace" if encoding == "gb18030" else "strict"
+    affected_rows: list[int] = []
+    replacement_count = 0
+    omitted_row_count = 0
     with path.open("r", encoding=encoding, errors=errors, newline="") as handle:
         reader = csv.reader(handle)
         headers = next(reader, None)
@@ -131,6 +157,17 @@ def load_csv_document_items(path: Path) -> Iterator[tuple[str, DocumentRecord]]:
             return
         indexes = _header_indexes(headers)
         for source_row, row in enumerate(reader, start=2):
+            row_replacements = (
+                sum(value.count("\ufffd") for value in row)
+                if encoding == "gb18030"
+                else 0
+            )
+            if row_replacements:
+                replacement_count += row_replacements
+                if len(affected_rows) < max_diagnostic_rows:
+                    affected_rows.append(source_row)
+                else:
+                    omitted_row_count += 1
             if not any(clean_text(value) for value in row):
                 continue
             source_id = _cell(row, indexes, "ID")
@@ -138,11 +175,38 @@ def load_csv_document_items(path: Path) -> Iterator[tuple[str, DocumentRecord]]:
             yield normalized_source_id, _document_from_row(
                 row, indexes, source_row, source_id, normalized_source_id
             )
+    if replacement_count:
+        report = CsvDecodeDiagnostics(
+            path=path,
+            encoding=encoding,
+            affected_rows=tuple(affected_rows),
+            replacement_count=replacement_count,
+            omitted_row_count=omitted_row_count,
+        )
+        if diagnostics is not None:
+            diagnostics.append(report)
+        else:
+            warnings.warn(
+                "Replaced malformed gb18030 byte sequences in "
+                f"{path.name}: {replacement_count} replacements across "
+                f"{len(affected_rows) + omitted_row_count} rows.",
+                CsvDecodeWarning,
+                stacklevel=2,
+            )
 
 
-def load_csv_documents(path: Path) -> Iterator[DocumentRecord]:
+def load_csv_documents(
+    path: Path,
+    *,
+    diagnostics: list[CsvDecodeDiagnostics] | None = None,
+    max_diagnostic_rows: int = DEFAULT_MAX_DIAGNOSTIC_ROWS,
+) -> Iterator[DocumentRecord]:
     """Stream Zotero-style MPP metadata rows as canonical document records."""
-    for _, document in load_csv_document_items(path):
+    for _, document in load_csv_document_items(
+        path,
+        diagnostics=diagnostics,
+        max_diagnostic_rows=max_diagnostic_rows,
+    ):
         yield document
 
 

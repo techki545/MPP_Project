@@ -26,6 +26,15 @@ class DocumentRecord:
 
 
 @dataclass(frozen=True)
+class DocumentSource:
+    document_id: str
+    source_id: str
+    normalized_source_id: str
+    source_row: int
+    url: str
+
+
+@dataclass(frozen=True)
 class FileRecord:
     file_id: str
     path: str

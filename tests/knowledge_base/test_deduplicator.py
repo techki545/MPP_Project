@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from knowledge_base.deduplicator import DocumentLookup, hash_file, match_pdf
 from knowledge_base.models import DocumentRecord
 from knowledge_base.normalization import normalize_title
@@ -40,6 +42,15 @@ def test_hash_file_detects_exact_duplicate_using_large_streamed_content(tmp_path
     assert hash_file(first) == hash_file(second)
 
 
+@pytest.mark.parametrize("block_size", [0, -1])
+def test_hash_file_rejects_non_positive_block_sizes(tmp_path: Path, block_size: int) -> None:
+    path = tmp_path / "article.pdf"
+    path.write_bytes(b"pdf")
+
+    with pytest.raises(ValueError, match="positive"):
+        hash_file(path, block_size=block_size)
+
+
 def test_match_pdf_prefers_doi_before_source_id_and_title() -> None:
     doi_document = _document("doc-doi", "Different Trial", doi="10.1000/abc")
     source_document = _document("doc-source", "MPP Steroid Trial", source_id="12")
@@ -62,6 +73,35 @@ def test_match_pdf_does_not_truncate_a_doi_to_match_a_prefix() -> None:
 
     assert result.document_id is None
     assert result.method == "unmatched"
+
+
+def test_match_pdf_does_not_treat_an_unmatched_doi_prefix_as_a_source_id() -> None:
+    source_document = _document("doc-source", "Source Ten")
+    lookup = DocumentLookup.from_documents((("10", source_document),))
+
+    result = match_pdf(Path("10.1000%2Fnot-in-index.pdf"), lookup)
+
+    assert result.document_id is None
+    assert result.method == "unmatched"
+
+
+@pytest.mark.parametrize(
+    ("doi", "filename"),
+    [
+        ("10.1000/abc_def", "10.1000%2Fabc_def.pdf"),
+        ("10.1000/abc(test)", "https%3A%2F%2Fdoi.org%2F10.1000%2Fabc%28test%29.pdf"),
+    ],
+)
+def test_match_pdf_accepts_complete_legal_doi_filename_characters(
+    doi: str, filename: str
+) -> None:
+    document = _document("doc-doi", "Trial", doi=doi)
+    lookup = DocumentLookup.from_documents((("1", document),))
+
+    result = match_pdf(Path(filename), lookup)
+
+    assert result.document_id == "doc-doi"
+    assert result.method == "doi"
 
 
 def test_match_pdf_prefers_the_longest_complete_doi_in_a_filename() -> None:
@@ -88,6 +128,15 @@ def test_match_pdf_uses_normalized_numeric_source_id_prefix() -> None:
     assert result.confidence == 1.0
 
 
+@pytest.mark.parametrize("filename", ["15572同5320.pdf", "18662张春风.pdf"])
+def test_match_pdf_uses_numeric_source_prefix_before_cjk(filename: str) -> None:
+    document = _document("doc-source", "MPP Trial")
+    lookup = DocumentLookup.from_documents((("15572" if filename.startswith("15572") else "18662", document),))
+
+    result = match_pdf(Path(filename), lookup)
+
+    assert result.document_id == "doc-source"
+    assert result.method == "source_id"
 def test_match_pdf_accepts_source_id_mapping_for_pipeline_callers() -> None:
     document = _document("doc-12", "MPP Steroid Trial")
 

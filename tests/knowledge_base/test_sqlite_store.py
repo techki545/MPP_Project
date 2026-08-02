@@ -8,7 +8,13 @@ import zlib
 import pytest
 
 from knowledge_base.errors import KnowledgeBaseError
-from knowledge_base.models import ChunkRecord, DocumentRecord, FileRecord, SearchFilters
+from knowledge_base.models import (
+    ChunkRecord,
+    DocumentRecord,
+    DocumentSource,
+    FileRecord,
+    SearchFilters,
+)
 import knowledge_base.sqlite_store as sqlite_store_module
 from knowledge_base.sqlite_store import SQLiteStore
 
@@ -107,7 +113,7 @@ def test_shared_records_are_immutable(document: DocumentRecord):
 
 
 def test_initialize_reports_schema_version_and_wal(store: SQLiteStore):
-    assert store.schema_version() == 2
+    assert store.schema_version() == 3
     assert store.journal_mode().lower() == "wal"
 
 
@@ -138,6 +144,22 @@ def test_document_provenance_round_trip_and_source_aliases(
     assert aliases == [
         ("source_id:12", "doc-1", "source_id"),
         ("source_id:13", "doc-1", "source_id"),
+    ]
+    assert store.list_document_sources(document.document_id) == [
+        DocumentSource(
+            document_id="doc-1",
+            source_id="0012.0",
+            normalized_source_id="12",
+            source_row=7,
+            url="https://example.test/first",
+        ),
+        DocumentSource(
+            document_id="doc-1",
+            source_id="0013",
+            normalized_source_id="13",
+            source_row=7,
+            url="https://example.test/second",
+        ),
     ]
 
 
@@ -175,7 +197,47 @@ def test_initialize_migrates_v1_documents_with_provenance_columns(tmp_path: Path
     with sqlite3.connect(path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(documents)")}
     assert {"source_id", "normalized_source_id", "url"}.issubset(columns)
-    assert store.schema_version() == 2
+    assert store.schema_version() == 3
+    with sqlite3.connect(path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert "document_sources" in tables
+
+
+def test_initialize_is_idempotent_after_provenance_migration(tmp_path: Path):
+    store = SQLiteStore(tmp_path / "manifest.sqlite3")
+
+    store.initialize()
+    store.initialize()
+
+    assert store.schema_version() == 3
+
+
+def test_initialize_rolls_back_schema_when_provenance_migration_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store = SQLiteStore(tmp_path / "manifest.sqlite3")
+
+    def fail_migration(connection: sqlite3.Connection) -> None:
+        raise RuntimeError("injected migration failure")
+
+    monkeypatch.setattr(store, "_migrate_document_provenance", fail_migration)
+    with pytest.raises(RuntimeError, match="injected migration failure"):
+        store.initialize()
+
+    with sqlite3.connect(store.path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert "documents" not in tables
+    assert "document_sources" not in tables
 
 
 def test_embedding_cache_round_trip_is_model_scoped(store: SQLiteStore):

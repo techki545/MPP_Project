@@ -15,6 +15,7 @@ from .errors import KnowledgeBaseError
 from .models import (
     ChunkRecord,
     DocumentRecord,
+    DocumentSource,
     EmbeddingItem,
     FileRecord,
     RankedHit,
@@ -22,8 +23,138 @@ from .models import (
 )
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _BASIC_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]")
+_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS schema_info (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS documents (
+        document_id TEXT PRIMARY KEY,
+        source_row INTEGER NOT NULL,
+        source_id TEXT NOT NULL DEFAULT '',
+        normalized_source_id TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL,
+        normalized_title TEXT NOT NULL,
+        authors_json TEXT NOT NULL,
+        year INTEGER,
+        journal TEXT NOT NULL,
+        doi TEXT NOT NULL,
+        normalized_doi TEXT NOT NULL,
+        abstract TEXT NOT NULL,
+        language TEXT NOT NULL,
+        url TEXT NOT NULL DEFAULT '',
+        evidence_type TEXT NOT NULL,
+        classification_confidence REAL NOT NULL,
+        classification_basis TEXT NOT NULL,
+        has_fulltext INTEGER NOT NULL,
+        fulltext_status TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS files (
+        file_id TEXT PRIMARY KEY,
+        path TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        document_id TEXT REFERENCES documents(document_id) ON DELETE SET NULL,
+        match_method TEXT NOT NULL,
+        match_confidence REAL NOT NULL,
+        status TEXT NOT NULL,
+        error_code TEXT NOT NULL,
+        error_message TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS document_aliases (
+        alias TEXT PRIMARY KEY,
+        document_id TEXT NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
+        alias_type TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS document_sources (
+        document_id TEXT NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
+        source_id TEXT NOT NULL,
+        normalized_source_id TEXT NOT NULL,
+        source_row INTEGER NOT NULL,
+        url TEXT NOT NULL,
+        PRIMARY KEY (document_id, source_row, source_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS document_sources_normalized_source_id_idx
+    ON document_sources(normalized_source_id)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS chunks (
+        chunk_id TEXT PRIMARY KEY,
+        document_id TEXT NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
+        file_id TEXT NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
+        section TEXT NOT NULL,
+        page_start INTEGER NOT NULL,
+        page_end INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        token_count INTEGER NOT NULL,
+        is_ocr INTEGER NOT NULL,
+        quality TEXT NOT NULL,
+        content_hash TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS embedding_cache (
+        content_hash TEXT NOT NULL,
+        model_name TEXT NOT NULL,
+        dimension INTEGER NOT NULL,
+        vector_blob BLOB NOT NULL,
+        PRIMARY KEY (content_hash, model_name)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS embedding_index_state (
+        record_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        model_name TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        PRIMARY KEY (record_id, kind, model_name)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS build_jobs (
+        job_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL,
+        progress_json TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ingest_errors (
+        error_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        stage TEXT NOT NULL,
+        record_id TEXT NOT NULL,
+        code TEXT NOT NULL,
+        message TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS metadata_fts USING fts5(
+        document_id UNINDEXED,
+        title_tokens,
+        abstract_tokens
+    )
+    """,
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS fulltext_fts USING fts5(
+        chunk_id UNINDEXED,
+        document_id UNINDEXED,
+        section_tokens,
+        body_tokens
+    )
+    """,
+)
 
 
 def basic_tokenizer(text: str) -> str:
@@ -57,102 +188,9 @@ class SQLiteStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS schema_info (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS documents (
-                    document_id TEXT PRIMARY KEY,
-                    source_row INTEGER NOT NULL,
-                    source_id TEXT NOT NULL DEFAULT '',
-                    normalized_source_id TEXT NOT NULL DEFAULT '',
-                    title TEXT NOT NULL,
-                    normalized_title TEXT NOT NULL,
-                    authors_json TEXT NOT NULL,
-                    year INTEGER,
-                    journal TEXT NOT NULL,
-                    doi TEXT NOT NULL,
-                    normalized_doi TEXT NOT NULL,
-                    abstract TEXT NOT NULL,
-                    language TEXT NOT NULL,
-                    url TEXT NOT NULL DEFAULT '',
-                    evidence_type TEXT NOT NULL,
-                    classification_confidence REAL NOT NULL,
-                    classification_basis TEXT NOT NULL,
-                    has_fulltext INTEGER NOT NULL,
-                    fulltext_status TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS files (
-                    file_id TEXT PRIMARY KEY,
-                    path TEXT NOT NULL,
-                    sha256 TEXT NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    document_id TEXT REFERENCES documents(document_id) ON DELETE SET NULL,
-                    match_method TEXT NOT NULL,
-                    match_confidence REAL NOT NULL,
-                    status TEXT NOT NULL,
-                    error_code TEXT NOT NULL,
-                    error_message TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS document_aliases (
-                    alias TEXT PRIMARY KEY,
-                    document_id TEXT NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
-                    alias_type TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS chunks (
-                    chunk_id TEXT PRIMARY KEY,
-                    document_id TEXT NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
-                    file_id TEXT NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
-                    section TEXT NOT NULL,
-                    page_start INTEGER NOT NULL,
-                    page_end INTEGER NOT NULL,
-                    text TEXT NOT NULL,
-                    token_count INTEGER NOT NULL,
-                    is_ocr INTEGER NOT NULL,
-                    quality TEXT NOT NULL,
-                    content_hash TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS embedding_cache (
-                    content_hash TEXT NOT NULL,
-                    model_name TEXT NOT NULL,
-                    dimension INTEGER NOT NULL,
-                    vector_blob BLOB NOT NULL,
-                    PRIMARY KEY (content_hash, model_name)
-                );
-                CREATE TABLE IF NOT EXISTS embedding_index_state (
-                    record_id TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    model_name TEXT NOT NULL,
-                    content_hash TEXT NOT NULL,
-                    PRIMARY KEY (record_id, kind, model_name)
-                );
-                CREATE TABLE IF NOT EXISTS build_jobs (
-                    job_id TEXT PRIMARY KEY,
-                    state TEXT NOT NULL,
-                    progress_json TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS ingest_errors (
-                    error_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    stage TEXT NOT NULL,
-                    record_id TEXT NOT NULL,
-                    code TEXT NOT NULL,
-                    message TEXT NOT NULL
-                );
-                CREATE VIRTUAL TABLE IF NOT EXISTS metadata_fts USING fts5(
-                    document_id UNINDEXED,
-                    title_tokens,
-                    abstract_tokens
-                );
-                CREATE VIRTUAL TABLE IF NOT EXISTS fulltext_fts USING fts5(
-                    chunk_id UNINDEXED,
-                    document_id UNINDEXED,
-                    section_tokens,
-                    body_tokens
-                );
-                """
-            )
+            connection.execute("BEGIN IMMEDIATE")
+            for statement in _SCHEMA_STATEMENTS:
+                connection.execute(statement)
             self._migrate_document_provenance(connection)
             connection.execute(
                 """
@@ -175,6 +213,19 @@ class SQLiteStore:
         ):
             if name not in columns:
                 connection.execute(f"ALTER TABLE documents ADD COLUMN {name} {definition}")
+        connection.execute(
+            """
+            INSERT INTO document_sources(
+                document_id, source_id, normalized_source_id, source_row, url
+            )
+            SELECT document_id, source_id, normalized_source_id, source_row, url
+            FROM documents
+            WHERE source_id <> '' OR normalized_source_id <> '' OR url <> ''
+            ON CONFLICT(document_id, source_row, source_id) DO UPDATE SET
+                normalized_source_id = excluded.normalized_source_id,
+                url = excluded.url
+            """
+        )
 
     def schema_version(self) -> int:
         with self._connection() as connection:
@@ -219,6 +270,24 @@ class SQLiteStore:
                 """,
                 self._document_values(record),
             )
+            if record.source_id or record.normalized_source_id or record.url:
+                connection.execute(
+                    """
+                    INSERT INTO document_sources(
+                        document_id, source_id, normalized_source_id, source_row, url
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(document_id, source_row, source_id) DO UPDATE SET
+                        normalized_source_id = excluded.normalized_source_id,
+                        url = excluded.url
+                    """,
+                    (
+                        record.document_id,
+                        record.source_id,
+                        record.normalized_source_id,
+                        record.source_row,
+                        record.url,
+                    ),
+                )
             if record.normalized_source_id:
                 connection.execute(
                     """
@@ -253,6 +322,28 @@ class SQLiteStore:
                 "SELECT * FROM documents WHERE document_id = ?", (document_id,)
             ).fetchone()
         return self._document_from_row(row) if row is not None else None
+
+    def list_document_sources(self, document_id: str) -> list[DocumentSource]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT document_id, source_id, normalized_source_id, source_row, url
+                FROM document_sources
+                WHERE document_id = ?
+                ORDER BY source_row, source_id
+                """,
+                (document_id,),
+            ).fetchall()
+        return [
+            DocumentSource(
+                document_id=row["document_id"],
+                source_id=row["source_id"],
+                normalized_source_id=row["normalized_source_id"],
+                source_row=row["source_row"],
+                url=row["url"],
+            )
+            for row in rows
+        ]
 
     def upsert_file(self, record: FileRecord) -> None:
         with self._connection() as connection:
