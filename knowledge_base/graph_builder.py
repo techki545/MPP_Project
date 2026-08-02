@@ -79,6 +79,7 @@ class EvidenceClaim:
     source_chunk_ids: tuple[str, ...]
     evidence_cutoff_year: int | None = None
     safety_signal: bool = False
+    design: str = ""
     dose: str = ""
     sample_size: str = ""
     effect_measures: tuple[str, ...] = ()
@@ -109,6 +110,7 @@ class EvidenceClaim:
             "outcome": self.outcome,
             "direction": self.direction,
             "safety_signal": self.safety_signal,
+            "design": self.design,
             "dose": self.dose,
             "sample_size": self.sample_size,
             "effect_measures": list(self.effect_measures),
