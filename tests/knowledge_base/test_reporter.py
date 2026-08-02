@@ -4,6 +4,7 @@ import pytest
 
 from knowledge_base.errors import KnowledgeBaseError
 from knowledge_base.evidence_classifier import EvidenceAssessment
+from knowledge_base.graph_builder import EvidenceClaim
 from knowledge_base.reporter import (
     ChatEvidenceRefiner,
     EvidenceBundle,
@@ -29,9 +30,7 @@ class FakeChatClient:
 
 
 def evidence_bundle() -> EvidenceBundle:
-    return EvidenceBundle(
-        sources=(
-            EvidenceSource(
+    source = EvidenceSource(
                 source_number=1,
                 document_id="doc-1",
                 title="Randomized trial",
@@ -45,8 +44,27 @@ def evidence_bundle() -> EvidenceBundle:
                 page_ranges=("3",),
                 fulltext=True,
                 classification_confidence=0.9,
-            ),
+            )
+    claim = EvidenceClaim(
+        claim_id="claim-1-0",
+        document_id="doc-1",
+        evidence_type="randomized_controlled_trial",
+        year=2025,
+        population="children",
+        intervention="methylprednisolone",
+        comparator="",
+        outcome="fever duration",
+        direction="supports",
+        statement="Low-dose methylprednisolone was supported for fever duration.",
+        source_chunk_ids=("chunk-1",),
+        source_quote=(
+            "low-dose methylprednisolone 2 mg/kg/day was supported for fever duration"
         ),
+        clinical_aspect="effectiveness",
+        evidence_role="core",
+    )
+    return EvidenceBundle(
+        sources=(source,),
         graph={
             "nodes": [
                 {"node_id": "question", "node_type": "question", "payload": {}},
@@ -66,6 +84,7 @@ def evidence_bundle() -> EvidenceBundle:
             ],
             "edges": [],
         },
+        claims=(claim,),
     )
 
 
@@ -73,12 +92,52 @@ def valid_report_response() -> dict:
     return {
         "analysis_steps": [
             {
-                "title": "第一步：盘点证据",
+                "stage_key": "inventory",
+                "title": "第一步：检索并盘点证据库存",
                 "body": "纳入一项随机对照试验。[1]",
                 "source_ids": [1],
-            }
+            },
+            {
+                "stage_key": "guidelines",
+                "title": "第二步：优先查看指南",
+                "body": "未检索到指南。",
+                "source_ids": [],
+            },
+            {
+                "stage_key": "systematic_reviews",
+                "title": "第三步：查阅系统综述，检验指南结论",
+                "body": "未检索到系统综述。",
+                "source_ids": [],
+            },
+            {
+                "stage_key": "randomized_trials",
+                "title": "第四步：聚焦关键随机对照试验",
+                "body": "核对随机试验原文。[1]",
+                "source_ids": [1],
+            },
+            {
+                "stage_key": "lower_level_evidence",
+                "title": "第五步：用下级证据补充安全性与边界",
+                "body": "未检索到下级补充证据。",
+                "source_ids": [],
+            },
+            {
+                "stage_key": "synthesis",
+                "title": "第六步：检查一致性并形成综合判断",
+                "body": "综合一项可追溯声明。[1]",
+                "source_ids": [1],
+            },
         ],
         "final_answer_markdown": (
+            "## 综合回答\n\n"
+            "Low-dose methylprednisolone was supported for fever duration.[1]\n\n"
+            "### 证据链\n"
+            "Low-dose methylprednisolone was supported for fever duration.[1]\n\n"
+            "### 时间更新\n"
+            "Low-dose methylprednisolone was supported for fever duration.[1]\n\n"
+            "### 安全性与适用边界\n"
+            "Low-dose methylprednisolone was supported for fever duration.[1]\n\n"
+            "### 证据缺口\n"
             "Low-dose methylprednisolone was supported for fever duration.[1]"
         ),
     }
@@ -94,18 +153,22 @@ def test_reporter_accepts_only_known_source_numbers() -> None:
     assert report.model_error is None
 
 
-def test_reporter_allows_uncited_markdown_heading_before_grounded_claim() -> None:
-    response = valid_report_response()
-    response["final_answer_markdown"] = (
-        "**Evidence answer**\n\n"
-        "Low-dose methylprednisolone was supported for fever duration.[1]"
-    )
+def test_report_request_requires_first_demo_stage_and_heading_contract() -> None:
+    chat = FakeChatClient(valid_report_response())
 
-    report = GroundedReporter(FakeChatClient(response)).generate(
-        "question", evidence_bundle()
-    )
+    report = GroundedReporter(chat).generate("question", evidence_bundle())
 
-    assert report.model_used is True
+    required = chat.calls[0][1]["required_output"]
+    assert [step["stage_key"] for step in required["analysis_steps"]] == [
+        "inventory",
+        "guidelines",
+        "systematic_reviews",
+        "randomized_trials",
+        "lower_level_evidence",
+        "synthesis",
+    ]
+    assert "### 证据链" in required["final_answer_markdown"]
+    assert len(report.analysis_steps) == 6
 
 
 def test_reporter_rejects_clinical_assertion_disguised_as_heading() -> None:
@@ -180,8 +243,10 @@ def test_reporter_rejects_qualitative_claim_absent_from_validated_graph() -> Non
 
 def test_reporter_fallback_canonicalizes_cited_model_paraphrase() -> None:
     response = valid_report_response()
-    response["final_answer_markdown"] = (
-        "The evidence favors low-dose methylprednisolone for shortening fever.[1]"
+    response["final_answer_markdown"] = response["final_answer_markdown"].replace(
+        "Low-dose methylprednisolone was supported for fever duration.[1]",
+        "The evidence favors low-dose methylprednisolone for shortening fever.[1]",
+        1,
     )
 
     report = GroundedReporter(FakeChatClient(response)).generate_with_fallback(
@@ -191,15 +256,22 @@ def test_reporter_fallback_canonicalizes_cited_model_paraphrase() -> None:
     assert report.model_used is True
     assert report.model_error is None
     assert report.analysis_steps[0]["source_ids"] == [1]
-    assert report.final_answer_markdown == (
-        "Low-dose methylprednisolone was supported for fever duration.[1]"
+    assert "## 综合回答" in report.final_answer_markdown
+    assert "### 证据链" in report.final_answer_markdown
+    assert "Low-dose methylprednisolone was supported for fever duration.[1]" in (
+        report.final_answer_markdown
     )
+    assert "The evidence favors" not in report.final_answer_markdown
 
 
 def test_reporter_canonicalizes_when_reasoning_metadata_is_invalid() -> None:
     response = valid_report_response()
     response["analysis_steps"][0]["source_ids"] = [99]
-    response["final_answer_markdown"] = "A translated evidence summary.[1]"
+    response["final_answer_markdown"] = response["final_answer_markdown"].replace(
+        "Low-dose methylprednisolone was supported for fever duration.[1]",
+        "A translated evidence summary.[1]",
+        1,
+    )
 
     report = GroundedReporter(FakeChatClient(response)).generate_with_fallback(
         "question", evidence_bundle()
@@ -207,9 +279,9 @@ def test_reporter_canonicalizes_when_reasoning_metadata_is_invalid() -> None:
 
     assert report.model_used is True
     assert report.model_error is None
-    assert len(report.analysis_steps) == 4
-    assert report.final_answer_markdown == (
-        "Low-dose methylprednisolone was supported for fever duration.[1]"
+    assert len(report.analysis_steps) == 6
+    assert "Low-dose methylprednisolone was supported for fever duration.[1]" in (
+        report.final_answer_markdown
     )
 
 
@@ -242,7 +314,12 @@ def test_reporter_fallback_preserves_inventory_and_graph() -> None:
     assert report.model_error == "ungrounded_model_response"
     assert report.evidence_inventory[0]["document_id"] == "doc-1"
     assert report.graph == bundle.graph
-    assert report.analysis_steps
+    assert len(report.analysis_steps) == 6
+    assert report.final_answer_markdown.startswith("## 综合回答")
+    assert "### 证据链" in report.final_answer_markdown
+    assert "### 时间更新" in report.final_answer_markdown
+    assert "### 安全性与适用边界" in report.final_answer_markdown
+    assert "### 证据缺口" in report.final_answer_markdown
     assert "Low-dose methylprednisolone was supported for fever duration.[1]" in (
         report.final_answer_markdown
     )

@@ -11,6 +11,11 @@ from typing import Any
 from .errors import KnowledgeBaseError
 from .evidence_classifier import EvidenceAssessment
 from .graph_builder import CLINICAL_ASPECTS, EVIDENCE_ROLES, EvidenceClaim
+from .report_structure import (
+    EXPECTED_STAGE_KEYS,
+    FIRST_DEMO_STAGES,
+    compose_deterministic_report,
+)
 
 
 _EVIDENCE_TYPES = {
@@ -82,19 +87,30 @@ _REPORT_HEADING_LABELS = frozenset(
         "综合回答",
         "推荐意见",
         "结论",
+        "证据链",
+        "时间更新",
+        "安全性与适用边界",
+        "证据缺口",
     }
 )
 _MODEL_REPORT_PROMPT = """
 You are a clinical evidence synthesis engine. Return one JSON object with exactly
-analysis_steps and final_answer_markdown. Explain retrieval inventory, evidence
-hierarchy, chronology, agreement, lower-level supplementation, limitations, and
-the final answer. Cite only the numbered sources supplied as [N]. Never invent a
-study, number, dose, effect size, confidence interval, source, or citation. Any
-quantitative value must appear in a cited source snippet. In the final answer,
-put citations immediately after every substantive sentence and reuse a validated
-graph claim statement verbatim for each clinical assertion. Do not translate or
-paraphrase those claim statements. This is evidence support, not a substitute for
-an individual clinician's judgment.
+analysis_steps and final_answer_markdown. analysis_steps must contain exactly six
+items in this stage_key order: inventory, guidelines, systematic_reviews,
+randomized_trials, lower_level_evidence, synthesis. Use the supplied Chinese title
+for each stage. Explicitly state when an evidence level is absent. Follow the
+evidence pyramid, then use chronology to decide whether newer lower-level evidence
+updates, confirms, supplements, conflicts with, or cautions higher-level evidence.
+
+The final answer must start with "## 综合回答", immediately give a conclusion, and
+then contain these headings in order: "### 证据链", "### 时间更新",
+"### 安全性与适用边界", and "### 证据缺口". Cite only the numbered sources
+supplied as [N]. Never invent a study, number, dose, effect size, confidence
+interval, source, or citation. Any quantitative value must appear in a cited
+source snippet. Put citations immediately after every substantive sentence and
+reuse a validated graph claim statement verbatim for each clinical assertion.
+Do not translate or paraphrase those claim statements. This is evidence support,
+not a substitute for an individual clinician's judgment.
 """.strip()
 _CLAIM_EXTRACTION_PROMPT = """
 Extract only source-grounded clinical claims from the numbered evidence snippets.
@@ -506,9 +522,19 @@ class GroundedReporter:
                 "evidence_bundle": _bundle_for_model(bundle),
                 "required_output": {
                     "analysis_steps": [
-                        {"title": "string", "body": "string", "source_ids": [1]}
+                        {
+                            "stage_key": stage_key,
+                            "title": title,
+                            "body": "source-grounded string",
+                            "source_ids": [1],
+                        }
+                        for stage_key, title in FIRST_DEMO_STAGES
                     ],
-                    "final_answer_markdown": "string with [N] citations",
+                    "final_answer_markdown": (
+                        "## 综合回答\n\n**结论：...**[N]\n\n"
+                        "### 证据链\n...\n\n### 时间更新\n...\n\n"
+                        "### 安全性与适用边界\n...\n\n### 证据缺口\n..."
+                    ),
                 },
             },
         )
@@ -551,7 +577,7 @@ class GroundedReporter:
                     if not isinstance(raw_final, str) or not raw_final.strip():
                         raise
                     analysis_steps = self._deterministic_fallback(
-                        bundle, "ungrounded_model_response"
+                        question, bundle, "ungrounded_model_response"
                     ).analysis_steps
                 final_answer = _canonicalize_report_claims(
                     raw_final, bundle, sources
@@ -561,7 +587,7 @@ class GroundedReporter:
             code = error.code
         except Exception:
             code = "model_generation_failed"
-        return self._deterministic_fallback(bundle, code)
+        return self._deterministic_fallback(question, bundle, code)
 
     @staticmethod
     def _validate_response(
@@ -587,19 +613,38 @@ class GroundedReporter:
         final_answer = final_answer.strip()
         if not final_answer:
             raise _ungrounded()
+        required_headings = (
+            "## 综合回答",
+            "### 证据链",
+            "### 时间更新",
+            "### 安全性与适用边界",
+            "### 证据缺口",
+        )
+        heading_positions = [final_answer.find(heading) for heading in required_headings]
+        if (
+            not final_answer.startswith(required_headings[0])
+            or any(position < 0 for position in heading_positions)
+            or heading_positions != sorted(heading_positions)
+        ):
+            raise _ungrounded()
 
         sources = {item.source_number: item for item in bundle.sources}
         known_numbers = set(sources)
         validated_steps: list[dict[str, Any]] = []
-        for raw_step in raw_steps:
+        if len(raw_steps) != len(FIRST_DEMO_STAGES):
+            raise _ungrounded()
+        for index, raw_step in enumerate(raw_steps):
             if not isinstance(raw_step, Mapping):
                 raise _ungrounded()
+            stage_key = raw_step.get("stage_key")
             title = raw_step.get("title")
             body = raw_step.get("body")
             source_ids = raw_step.get("source_ids")
             if (
-                not isinstance(title, str)
+                stage_key != EXPECTED_STAGE_KEYS[index]
+                or not isinstance(title, str)
                 or not title.strip()
+                or title.strip() != FIRST_DEMO_STAGES[index][1]
                 or not isinstance(body, str)
                 or not body.strip()
                 or not isinstance(source_ids, list)
@@ -619,6 +664,7 @@ class GroundedReporter:
             _validate_statistics(f"{title} {body}", grounding_ids, sources)
             validated_steps.append(
                 {
+                    "stage_key": str(stage_key),
                     "title": title.strip(),
                     "body": body.strip(),
                     "source_ids": sorted(declared),
@@ -634,97 +680,12 @@ class GroundedReporter:
         return tuple(validated_steps), final_answer
 
     def _deterministic_fallback(
-        self, bundle: EvidenceBundle, error_code: str
+        self, question: str, bundle: EvidenceBundle, error_code: str
     ) -> GeneratedReport:
-        inventory_lines = [
-            f"- [{source.source_number}] {source.title} "
-            f"({source.evidence_type}, {source.year or 'year unknown'})"
-            for source in bundle.sources
-        ]
-        body = "\n".join(inventory_lines) if inventory_lines else "未检索到可用证据。"
-        source_numbers = {
-            source.document_id: source.source_number for source in bundle.sources
-        }
-        claim_lines = [
-            f"- {claim['statement']}[{source_numbers[document_id]}]"
-            for document_id, claims in _graph_claims_by_document(bundle).items()
-            if document_id in source_numbers
-            for claim in claims
-        ]
-        counts = Counter(source.evidence_type for source in bundle.sources)
-        inventory = "、".join(
-            f"{_EVIDENCE_LABELS[evidence_type]} {counts[evidence_type]} 项"
-            for evidence_type in _EVIDENCE_ORDER
-            if counts[evidence_type]
-        ) or "没有可用证据"
-        source_ids = [source.source_number for source in bundle.sources]
-        citations = "".join(f"[{number}]" for number in source_ids)
-        dated_sources = [source for source in bundle.sources if source.year is not None]
-        if dated_sources:
-            oldest = min(dated_sources, key=lambda source: (source.year or 0, source.source_number))
-            newest = max(dated_sources, key=lambda source: (source.year or 0, -source.source_number))
-            chronology = (
-                f"检索证据的发表年份覆盖 {oldest.year} 至 {newest.year}；较新的来源包括"
-                f"《{newest.title}》[{newest.source_number}]。年份只表示时间先后，"
-                "不能单独证明新证据推翻或更新旧结论。"
-            )
-        else:
-            chronology = "当前来源缺少可用发表年份，无法建立时间顺序。"
-        excerpt_lines = claim_lines or [
-            f"- 《{source.title}》[{source.source_number}]"
-            for source in bundle.sources[:8]
-        ]
-        highest_type = next(
-            (evidence_type for evidence_type in _EVIDENCE_ORDER if counts[evidence_type]),
-            "unknown",
-        )
-        fallback_answer = "\n\n".join(
-            (
-                "## 综合回答（确定性回退）",
-                (
-                    "模型服务未能完成本次语义综合。以下内容由本地程序从检索结果和原文命中片段中"
-                    "提取，仅陈列可追溯信息，不推断文献未明确表达的疗效方向。"
-                ),
-                "### 证据概况\n"
-                f"本次共纳入 {len(bundle.sources)} 项来源，包括{inventory}。{citations}",
-                "### 时间关系\n" + chronology,
-                "### 关键证据摘录\n" + "\n".join(excerpt_lines),
-                (
-                    "### 综合判断\n"
-                    f"当前证据库存的最高层级为{_EVIDENCE_LABELS[highest_type]}。"
-                    "这些来源可以形成后续人工或模型综合的证据基础，但在模型超时的情况下，"
-                    "不能仅凭检索相关性判断各研究结论是否一致，也不能据此自动给出具体治疗推荐。"
-                ),
-            )
-        )
-        relation_count = len(bundle.graph.get("edges", []))
+        structured = compose_deterministic_report(question, bundle)
         return GeneratedReport(
-            analysis_steps=(
-                {
-                    "title": "第一步：检索并盘点证据库存",
-                    "body": f"本次检索得到 {len(bundle.sources)} 项来源：{inventory}。\n{body}",
-                    "source_ids": source_ids,
-                },
-                {
-                    "title": "第二步：按照证据金字塔排序",
-                    "body": f"优先查看{_EVIDENCE_LABELS[highest_type]}，再使用较低层级来源补充细节。",
-                    "source_ids": source_ids,
-                },
-                {
-                    "title": "第三步：检查时间关系",
-                    "body": chronology,
-                    "source_ids": [source.source_number for source in dated_sources],
-                },
-                {
-                    "title": "第四步：形成可追溯回退判断",
-                    "body": (
-                        f"关系图保留了 {relation_count} 条可追溯关系。模型超时，"
-                        "因此不自动声称证据支持、反对或相互冲突。"
-                    ),
-                    "source_ids": source_ids[:8],
-                },
-            ),
-            final_answer_markdown=fallback_answer,
+            analysis_steps=structured.analysis_steps,
+            final_answer_markdown=structured.final_answer_markdown,
             model_used=False,
             model_name=str(getattr(self.chat_client, "model", "configured-model")),
             model_error=error_code,
@@ -756,9 +717,16 @@ def _source_for_model(source: EvidenceSource) -> dict[str, Any]:
 
 
 def _bundle_for_model(bundle: EvidenceBundle) -> dict[str, Any]:
+    model_sources = tuple(bundle.sources[:_MODEL_SOURCE_LIMIT])
+    allowed_documents = {source.document_id for source in model_sources}
     return {
-        "sources": _sources_for_model(bundle.sources),
+        "sources": _sources_for_model(model_sources),
         "graph": dict(bundle.graph),
+        "claims": [
+            claim.as_dict()
+            for claim in bundle.claims
+            if claim.document_id in allowed_documents
+        ],
     }
 
 
@@ -868,13 +836,52 @@ def _canonicalize_report_claims(
     cited_ids = _citation_ids(text)
     if not cited_ids or not cited_ids.issubset(sources):
         raise _ungrounded()
-    output_lines = [
-        f"{claim['statement']}[{source_number}]"
-        for source_number in sorted(cited_ids)
-        for claim in claims_by_document.get(sources[source_number].document_id, [])
-    ]
-    output_lines = list(dict.fromkeys(output_lines))
-    if not output_lines:
+    output_lines: list[str] = []
+    saw_claim = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or _is_allowed_report_heading(line):
+            output_lines.append(raw_line)
+            continue
+        cursor = 0
+        line_parts: list[str] = []
+        matches = list(_CITATION_GROUP_PATTERN.finditer(line))
+        if not matches:
+            raise _ungrounded()
+        for match in matches:
+            raw_segment = line[cursor : match.start()]
+            segment = _clean_report_segment(raw_segment)
+            segment_ids = _citation_ids(match.group(0))
+            if not segment or not segment_ids or not segment_ids.issubset(sources):
+                raise _ungrounded()
+            candidate_claims = [
+                (source_number, claim)
+                for source_number in sorted(segment_ids)
+                for claim in claims_by_document.get(
+                    sources[source_number].document_id, []
+                )
+            ]
+            if any(
+                _report_segment_is_grounded(segment, claim)
+                for _, claim in candidate_claims
+            ):
+                line_parts.append(raw_segment + match.group(0))
+            else:
+                replacements = list(
+                    dict.fromkeys(
+                        f"{claim['statement']}[{source_number}]"
+                        for source_number, claim in candidate_claims
+                    )
+                )
+                if not replacements:
+                    raise _ungrounded()
+                line_parts.append(" ".join(replacements))
+            saw_claim = True
+            cursor = match.end()
+        if _clean_report_segment(line[cursor:]):
+            raise _ungrounded()
+        output_lines.append("".join(line_parts))
+    if not saw_claim:
         raise _ungrounded()
     return "\n".join(output_lines)
 

@@ -123,10 +123,20 @@ def test_timeout_still_returns_extractable_synthesis_and_relation_graph() -> Non
     assert result["model_error"] == "chat_timeout"
     assert result["retrieval_stats"]["claim_count"] == 3
     assert len(result["graph"]["edges"]) >= 3
-    assert "## 综合回答（确定性回退）" in result["answer_markdown"]
-    assert "### 证据概况" in result["answer_markdown"]
-    assert "### 关键证据摘录" in result["answer_markdown"]
-    assert "### 综合判断" in result["answer_markdown"]
+    assert len(result["reasoning_steps"]) == 6
+    assert [step["stage_key"] for step in result["reasoning_steps"]] == [
+        "inventory",
+        "guidelines",
+        "systematic_reviews",
+        "randomized_trials",
+        "lower_level_evidence",
+        "synthesis",
+    ]
+    assert result["answer_markdown"].startswith("## 综合回答")
+    assert "### 证据链" in result["answer_markdown"]
+    assert "### 时间更新" in result["answer_markdown"]
+    assert "### 安全性与适用边界" in result["answer_markdown"]
+    assert "### 证据缺口" in result["answer_markdown"]
     assert "[1]" in result["answer_markdown"]
 
 
