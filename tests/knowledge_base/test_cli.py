@@ -113,6 +113,12 @@ def test_cli_build_completes_local_stages_without_api_configuration(
     status = json.loads(capsys.readouterr().out)
     assert status["state"] == "embedding_pending"
 
+    assert main(["query", "low dose treatment", "--json"]) == 0
+    query = json.loads(capsys.readouterr().out)
+    assert query["mode"] == "keyword"
+    assert query["sources"]
+    assert query["model_used"] is False
+
 
 def test_cli_confirming_embeddings_requires_model_configuration(
     tmp_path: Path, monkeypatch, capsys

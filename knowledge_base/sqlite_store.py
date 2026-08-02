@@ -437,6 +437,39 @@ class SQLiteStore:
             content_hash=row["content_hash"],
         )
 
+    def list_chunks_for_document(
+        self, document_id: str, *, limit: int | None = None
+    ) -> list[ChunkRecord]:
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
+        ):
+            raise KnowledgeBaseError(
+                "invalid_chunk_limit", "Chunk limit must be positive"
+            )
+        sql = "SELECT * FROM chunks WHERE document_id = ? ORDER BY page_start, chunk_id"
+        parameters: list[Any] = [document_id]
+        if limit is not None:
+            sql += " LIMIT ?"
+            parameters.append(limit)
+        with self._connection() as connection:
+            rows = connection.execute(sql, parameters).fetchall()
+        return [
+            ChunkRecord(
+                chunk_id=row["chunk_id"],
+                document_id=row["document_id"],
+                file_id=row["file_id"],
+                section=row["section"],
+                page_start=row["page_start"],
+                page_end=row["page_end"],
+                text=row["text"],
+                token_count=row["token_count"],
+                is_ocr=bool(row["is_ocr"]),
+                quality=row["quality"],
+                content_hash=row["content_hash"],
+            )
+            for row in rows
+        ]
+
     def list_document_sources(self, document_id: str) -> list[DocumentSource]:
         with self._connection() as connection:
             rows = connection.execute(
@@ -700,6 +733,35 @@ class SQLiteStore:
             ).fetchone()[0]
             chunk_count = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
         return int(metadata_count) + int(chunk_count)
+
+    def statistics(self) -> dict[str, int]:
+        with self._connection() as connection:
+            metadata_records = connection.execute(
+                "SELECT COUNT(*) FROM documents"
+            ).fetchone()[0]
+            pdf_files = connection.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+            matched_pdf_files = connection.execute(
+                "SELECT COUNT(*) FROM files WHERE document_id IS NOT NULL"
+            ).fetchone()[0]
+            parsed_pdf_files = connection.execute(
+                "SELECT COUNT(*) FROM files WHERE status IN ('parsed', 'partial')"
+            ).fetchone()[0]
+            chunks = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            embedded = connection.execute(
+                "SELECT COUNT(*) FROM embedding_index_state"
+            ).fetchone()[0]
+            errors = connection.execute(
+                "SELECT COUNT(*) FROM ingest_errors"
+            ).fetchone()[0]
+        return {
+            "metadata_records": int(metadata_records),
+            "pdf_files": int(pdf_files),
+            "matched_pdf_files": int(matched_pdf_files),
+            "parsed_pdf_files": int(parsed_pdf_files),
+            "chunks": int(chunks),
+            "embedded": int(embedded),
+            "errors": int(errors),
+        }
 
     def mark_embedding_indexed(
         self, record_id: str, kind: str, model_name: str, expected_content_hash: str

@@ -13,6 +13,8 @@ from .config import Settings
 from .embedding_client import EmbeddingClient
 from .errors import ConfigurationError, KnowledgeBaseError
 from .indexer import BuildPipeline, Indexer, build_default_pipeline
+from .models import SearchFilters
+from .service import create_production_service
 from .sqlite_store import SQLiteStore
 from .vector_store import LocalVectorStore
 
@@ -157,11 +159,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 finally:
                     if vector_store is not None:
                         vector_store.close()
-            else:
-                raise ConfigurationError(
-                    "query_pipeline_unavailable",
-                    "Query pipeline is not configured yet",
+            elif args.command == "query":
+                service = create_production_service(settings, store)
+                payload = service.query(
+                    args.question,
+                    SearchFilters(
+                        year_from=args.year_from,
+                        year_to=args.year_to,
+                        fulltext_only=args.fulltext_only,
+                    ),
                 )
+            else:
+                raise ConfigurationError("unknown_command", "Command is not supported")
         print(_render_success(payload, as_json=as_json))
         return 0
     except KnowledgeBaseError as error:

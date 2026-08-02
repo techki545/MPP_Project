@@ -58,6 +58,36 @@ class LocalVectorStore:
             self._validate_collection(collection_name, dimension, manifest)
         self._dimension = dimension
 
+    def load_existing(self, *, model_name: str) -> int:
+        """Load and validate an existing index without calling the embedding API."""
+        normalized_model = str(model_name).strip()
+        if not normalized_model:
+            raise KnowledgeBaseError(
+                "vector_collection_invalid", "Vector collection configuration is invalid"
+            )
+        if not all(
+            self._client.collection_exists(collection_name)
+            for collection_name in (self.METADATA_COLLECTION, self.FULLTEXT_COLLECTION)
+        ):
+            raise KnowledgeBaseError(
+                "vector_index_not_built", "Vector index has not been built"
+            )
+        metadata_info = self._client.get_collection(self.METADATA_COLLECTION)
+        vectors = metadata_info.config.params.vectors
+        if not isinstance(vectors, qmodels.VectorParams):
+            raise KnowledgeBaseError(
+                "vector_collection_mismatch", "Existing vector collection is incompatible"
+            )
+        dimension = int(vectors.size)
+        manifest = {
+            "embedding_model": normalized_model,
+            "schema_version": self.SCHEMA_VERSION,
+        }
+        for collection_name in (self.METADATA_COLLECTION, self.FULLTEXT_COLLECTION):
+            self._validate_collection(collection_name, dimension, manifest)
+        self._dimension = dimension
+        return dimension
+
     def upsert_metadata(
         self, items: Sequence[tuple[object, Sequence[float], Mapping[str, Any]]]
     ) -> None:

@@ -107,6 +107,26 @@ def test_document_file_chunk_round_trip_and_chinese_fts_search(
     assert hits[0].text == chunk.text
 
 
+def test_document_chunks_and_service_statistics_are_available(
+    store: SQLiteStore,
+    document: DocumentRecord,
+    file_record: FileRecord,
+    chunk: ChunkRecord,
+) -> None:
+    insert_document_graph(store, document, file_record, chunk)
+
+    assert store.list_chunks_for_document("doc-1", limit=1) == [chunk]
+    assert store.statistics() == {
+        "metadata_records": 1,
+        "pdf_files": 1,
+        "matched_pdf_files": 1,
+        "parsed_pdf_files": 0,
+        "chunks": 1,
+        "embedded": 0,
+        "errors": 0,
+    }
+
+
 def test_shared_records_are_immutable(document: DocumentRecord):
     with pytest.raises(FrozenInstanceError):
         document.title = "changed"  # type: ignore[misc]

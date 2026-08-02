@@ -212,6 +212,7 @@ class Indexer:
         document_limit: int | None = None,
         embedding_limit: int | None = None,
         confirm_embedding_cost: bool = False,
+        should_pause: Any | None = None,
     ) -> BuildRunResult:
         self._validate_optional_limit(document_limit, "document_limit_invalid")
         self._validate_optional_limit(embedding_limit, "embedding_limit_invalid")
@@ -221,6 +222,7 @@ class Indexer:
                 document_limit=document_limit,
                 embedding_limit=embedding_limit,
                 confirm_embedding_cost=confirm_embedding_cost,
+                should_pause=should_pause,
             )
         )
 
@@ -245,6 +247,7 @@ class Indexer:
         document_limit: int | None,
         embedding_limit: int | None,
         confirm_embedding_cost: bool,
+        should_pause: Any | None,
     ) -> BuildRunResult:
         stage_counters: dict[str, dict[str, int]] = {}
         self.store.set_job_state(self.JOB_ID, "running", {"stage_counters": {}})
@@ -298,7 +301,7 @@ class Indexer:
                         error_message="Build item could not be processed",
                     )
 
-                if self._pause_requested():
+                if self._pause_requested(should_pause):
                     result = self._build_result(stage_counters, "paused")
                     self.store.set_job_state(self.JOB_ID, "paused", result.as_dict())
                     return result
@@ -311,6 +314,7 @@ class Indexer:
         embedding = self._embed_pending_unlocked(
             confirm_embedding_cost=confirm_embedding_cost,
             embedding_limit=embedding_limit,
+            should_pause=should_pause,
         )
         stage_counters["embedding"] = {
             "processed": embedding.completed_embeddings,
@@ -320,7 +324,7 @@ class Indexer:
         current_failures = sum(
             counters.get("failed", 0) for counters in stage_counters.values()
         )
-        if self._pause_requested():
+        if self._pause_requested(should_pause):
             final_state = "paused"
         elif embedding.pending_embeddings:
             final_state = "embedding_pending"
@@ -333,7 +337,11 @@ class Indexer:
         return result
 
     def _embed_pending_unlocked(
-        self, *, confirm_embedding_cost: bool, embedding_limit: int | None
+        self,
+        *,
+        confirm_embedding_cost: bool,
+        embedding_limit: int | None,
+        should_pause: Any | None = None,
     ) -> EmbeddingRunResult:
         total_candidates = self.store.count_embedding_candidates()
         all_pending = self.store.list_pending_embedding_items(self.model_name)
@@ -391,7 +399,7 @@ class Indexer:
                     completed += 1
                 else:
                     failed += 1
-            if self._pause_requested():
+            if self._pause_requested(should_pause):
                 break
 
         pending = len(self.store.list_pending_embedding_items(self.model_name))
@@ -458,7 +466,11 @@ class Indexer:
             )
         return payload
 
-    def _pause_requested(self) -> bool:
+    def _pause_requested(self, should_pause: Any | None = None) -> bool:
+        if should_pause is not None:
+            is_set = getattr(should_pause, "is_set", None)
+            if callable(is_set) and is_set():
+                return True
         job = self.store.get_job(self.JOB_ID)
         return job is not None and job["state"] == "pause_requested"
 

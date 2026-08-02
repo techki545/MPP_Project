@@ -80,6 +80,25 @@ def test_reopen_persistent_store_preserves_collection_manifest_and_points(tmp_pa
         second.close()
 
 
+def test_load_existing_initializes_query_dimension_without_provider_probe(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "qdrant-existing"
+    first = LocalVectorStore(path)
+    first.ensure_collections(dimension=2, model_name="model-a")
+    first.upsert_metadata(
+        [("doc", [0, 1], {"document_id": "doc", "text": "persisted"})]
+    )
+    first.close()
+
+    second = LocalVectorStore(path)
+    try:
+        assert second.load_existing(model_name="model-a") == 2
+        assert second.query_metadata([0, 1], limit=1)[0].record_id == "doc"
+    finally:
+        second.close()
+
+
 @pytest.mark.parametrize("vector", [[1.0], [1.0, float("inf")], [True, 0.0]])
 def test_upsert_validates_vector_before_qdrant(vector) -> None:
     store = LocalVectorStore(":memory:")
