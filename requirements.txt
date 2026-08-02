@@ -1,0 +1,7 @@
+PyMuPDF>=1.24,<2
+filelock>=3.16,<4
+jieba==0.42.1
+onnxruntime>=1.20,<2
+openpyxl>=3.1,<4
+qdrant-client>=1.18,<2
+rapidocr>=3.9,<4

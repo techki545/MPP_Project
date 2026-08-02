@@ -4,8 +4,8 @@
 
 ## 运行环境
 
-- Python 3.9 或更高版本
-- 无必需的第三方 Python 依赖
+- Python 3.10+
+- 安装运行时依赖：`python -m pip install -r requirements.txt`
 - Chrome、Edge 或其他现代浏览器
 
 ## 启动
@@ -37,7 +37,7 @@ python web_server.py --host 127.0.0.1 --port 8766
 
 不启用模型时，系统仍可生成完整的本地循证报告。
 
-如果需要连接大模型，在网页中填写 OpenAI 兼容服务的 Base URL、模型名称和 API Key，然后测试连接。API Key 只参与当前请求，不写入仓库文件。
+大模型服务的 API Key、Base URL 和聊天模型仅通过后端环境变量配置，不在网页界面中输入或保存。
 
 ## 项目结构
 
