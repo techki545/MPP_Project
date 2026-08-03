@@ -54,6 +54,21 @@ _RELATION_LABELS = {
     "conflicts": "冲突",
     "cautions": "警示",
 }
+_MEDICATION_PATTERNS = (
+    ("甲泼尼龙", r"甲泼尼龙|甲强龙|methylprednisolone"),
+    ("地塞米松", r"地塞米松|dexamethasone"),
+    ("阿奇霉素", r"阿奇霉素|azithromycin"),
+    ("红霉素", r"红霉素|erythromycin"),
+    ("克拉霉素", r"克拉霉素|clarithromycin"),
+    ("多西环素", r"多西环素|doxycycline"),
+    ("米诺环素", r"米诺环素|minocycline"),
+    ("左氧氟沙星", r"左氧氟沙星|levofloxacin"),
+    ("莫西沙星", r"莫西沙星|moxifloxacin"),
+    ("静脉注射免疫球蛋白（IVIG）", r"丙种球蛋白|免疫球蛋白|ivig|gammaglobulin"),
+    ("糖皮质激素", r"糖皮质激素|皮质类固醇|皮质激素|glucocorticoid|corticosteroid"),
+    ("大环内酯类抗菌药物", r"大环内酯|macrolide"),
+    ("四环素类抗菌药物", r"四环素|tetracycline"),
+)
 
 
 @dataclass(frozen=True)
@@ -183,6 +198,7 @@ def _compose_conclusion_first_answer(
     relation_counts: Counter[str],
     claims_by_document: dict[str, list[EvidenceClaim]],
 ) -> str:
+    intent = _question_intent(question)
     relevant_aspects = _question_aspects(question)
     decision_claims = tuple(
         claim
@@ -190,11 +206,16 @@ def _compose_conclusion_first_answer(
         if claim.evidence_role == "core"
         and claim.clinical_aspect in relevant_aspects
     )
+    if intent != "yes_no" and not decision_claims:
+        decision_claims = tuple(
+            claim
+            for claim in bundle.claims
+            if claim.evidence_role != "boundary"
+            and claim.clinical_aspect in relevant_aspects
+        )
     directions = Counter(claim.direction for claim in decision_claims)
     clean_question = " ".join(question.split()).rstrip("?？")
-    yes_no_question = bool(
-        re.search(r"是否|应否|能否|可否|要不要|该不该|\b(?:should|whether|can)\b", question, re.I)
-    )
+    yes_no_question = intent == "yes_no"
     directional_sources = [
         source.source_number
         for source in bundle.sources
@@ -205,7 +226,14 @@ def _compose_conclusion_first_answer(
         )
     ]
     citation_suffix = "".join(f"[{number}]" for number in directional_sources)
-    if not directions or directions["supports"] + directions["opposes"] == 0:
+    if not yes_no_question:
+        conclusion = _open_question_conclusion(
+            intent,
+            clean_question,
+            decision_claims,
+            bundle.sources,
+        )
+    elif not directions or directions["supports"] + directions["opposes"] == 0:
         if yes_no_question:
             conclusion = f"**结论：对于“{clean_question}”，当前证据不足，不能回答“是”或“否”。**"
         else:
@@ -290,6 +318,118 @@ def _compose_conclusion_first_answer(
     )
 
 
+def _question_intent(question: str) -> str:
+    normalized = " ".join(question.casefold().split())
+    patterns = (
+        ("yes_no", r"是否|应否|能否|可否|要不要|该不该|\b(?:should|whether|can)\b"),
+        ("dose", r"剂量|用量|怎么用|dose|mg/kg"),
+        ("timing", r"时机|何时|什么时候|早期|晚期|timing|when|early"),
+        ("diagnosis", r"诊断|鉴别|确诊|diagnos"),
+        ("prognosis", r"预后|预测|危险因素|风险因素|predict|prognos|risk factor"),
+        ("safety", r"安全|不良反应|副作用|毒性|safety|adverse|harm"),
+        (
+            "medication",
+            r"吃什么药|用什么药|哪些药|药物|用药|怎么治疗|如何治疗|治疗方案|medicine|medication|which drug|treatment",
+        ),
+        ("applicability", r"适用|哪些人|什么人|人群|年龄|applicab|population"),
+    )
+    return next(
+        (
+            intent
+            for intent, pattern in patterns
+            if re.search(pattern, normalized, re.I)
+        ),
+        "general",
+    )
+
+
+def _open_question_conclusion(
+    intent: str,
+    question: str,
+    claims: tuple[EvidenceClaim, ...],
+    sources: tuple[EvidenceSource, ...],
+) -> str:
+    labels = {
+        "medication": "用药信息",
+        "dose": "剂量信息",
+        "timing": "治疗时机信息",
+        "diagnosis": "诊断信息",
+        "prognosis": "预后信息",
+        "safety": "安全性信息",
+        "applicability": "适用人群信息",
+        "general": "回答信息",
+    }
+    source_numbers = {
+        source.document_id: source.source_number for source in sources
+    }
+    lines: list[str] = []
+    seen: set[str] = set()
+    for claim in claims:
+        source_number = source_numbers.get(claim.document_id)
+        if source_number is None:
+            continue
+        if intent == "medication":
+            answer = _medication_answer(claim)
+        elif intent == "dose" and (claim.intervention or claim.dose):
+            answer = "：".join(
+                value for value in (claim.intervention, claim.dose) if value
+            )
+        else:
+            answer = _clean_claim_statement(claim.statement)
+        key = answer.casefold()
+        if not answer or key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"- {answer}[{source_number}]")
+        if len(lines) == 4:
+            break
+    label = labels.get(intent, labels["general"])
+    if not lines:
+        return f"**结论：针对“{question}”，当前验证后的证据不足以形成直接回答。**"
+    safety_note = (
+        "这些内容是检索证据中的治疗选项，不等同于针对个体患儿的处方。"
+        if intent in {"medication", "dose", "timing"}
+        else "以下内容均来自本次检索后通过验证的原文声明。"
+    )
+    return (
+        f"**结论：针对“{question}”，当前证据可直接提取的核心{label}如下。**"
+        f"{safety_note}\n" + "\n".join(lines)
+    )
+
+
+def _medication_answer(claim: EvidenceClaim) -> str:
+    source_text = " ".join(
+        value for value in (claim.intervention, claim.statement) if value
+    )
+    compact = re.sub(r"\s+", "", source_text).casefold()
+    names = [
+        label
+        for label, pattern in _MEDICATION_PATTERNS
+        if re.search(pattern, compact, re.I)
+    ]
+    if "甲泼尼龙" in names or "地塞米松" in names:
+        names = [name for name in names if name != "糖皮质激素"]
+    if "阿奇霉素" in names:
+        names = [name for name in names if name != "大环内酯类抗菌药物"]
+    dose = claim.dose or _dose_from_text(source_text)
+    if names:
+        answer = "、".join(dict.fromkeys(names))
+        return f"{answer}（{dose}）" if dose and len(names) == 1 else answer
+    intervention = _clean_claim_statement(claim.intervention)
+    if intervention:
+        return f"{intervention}（{dose}）" if dose else intervention
+    return _clean_claim_statement(claim.statement)
+
+
+def _dose_from_text(text: str) -> str:
+    match = re.search(
+        r"\b\d+(?:\.\d+)?\s*(?:mg|g)/kg(?:/(?:d|day))?\b",
+        text,
+        re.I,
+    )
+    return " ".join(match.group(0).split()) if match else ""
+
+
 def _question_aspects(question: str) -> set[str]:
     normalized = " ".join(question.casefold().split())
     specific_patterns = (
@@ -338,11 +478,17 @@ def _claim_line(
 ) -> str:
     claims = claims_by_document.get(source.document_id, [])
     if claims:
-        statement = re.sub(r"[\[［]\s*\d+\s*[\]］]", "", claims[0].statement)
-        statement = " ".join(statement.split())
+        statement = _clean_claim_statement(claims[0].statement)
         return f"- {statement}[{source.source_number}]"
     year = str(source.year) if source.year is not None else "年份未知"
     return f"- 《{source.title}》（{year}）[{source.source_number}]"
+
+
+def _clean_claim_statement(statement: str) -> str:
+    without_internal_citations = re.sub(
+        r"[\[［]\s*\d+\s*[\]］]", "", statement
+    )
+    return " ".join(without_internal_citations.split())
 
 
 def _synthesis_body(

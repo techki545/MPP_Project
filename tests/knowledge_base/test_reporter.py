@@ -396,6 +396,44 @@ def test_claim_extractor_discards_unknown_chunks_and_keeps_audit_record() -> Non
     assert result.audit[0]["reason"] == "unknown_source_chunk"
 
 
+def test_quote_id_claim_preserves_only_grounded_structured_fields() -> None:
+    response = {
+        "claims": [
+            {
+                "source_number": 1,
+                "source_quote_id": "quote-1-1",
+                "clinical_aspect": "effectiveness",
+                "direction": "uncertain",
+                "evidence_role": "core",
+                "population": "424 children",
+                "intervention": "methylprednisolone",
+                "comparator": "invented placebo",
+                "design": "randomized controlled trial",
+                "sample_size": "424",
+                "dose": "2 mg/kg/day",
+                "outcome": "fever duration",
+                "follow_up": "invented follow-up",
+                "effect_measures": [],
+                "limitations": [],
+                "safety_signal": False,
+                "statement": "ignored when a quote ID is used",
+            }
+        ]
+    }
+
+    result = GroundedClaimExtractor(FakeChatClient(response)).extract(
+        "What medicine should be used?", evidence_bundle()
+    )
+
+    claim = result.claims[0]
+    assert claim.intervention == "methylprednisolone"
+    assert claim.dose == "2 mg/kg/day"
+    assert claim.population == "424 children"
+    assert claim.design == "randomized controlled trial"
+    assert claim.comparator == ""
+    assert claim.follow_up == ""
+
+
 def test_claim_extractor_discards_semantics_not_supported_by_source_text() -> None:
     response = {
         "claims": [

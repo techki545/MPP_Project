@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from knowledge_base.document_graph import build_document_graph
 from knowledge_base.graph_builder import EvidenceClaim, LocalGraphBuilder
 from knowledge_base.report_structure import (
@@ -115,7 +117,7 @@ def test_deterministic_answer_is_conclusion_first_and_source_grounded() -> None:
     )
 
 
-def test_uncertain_claims_do_not_create_positive_or_negative_recommendation() -> None:
+def test_uncertain_open_claims_report_findings_without_a_recommendation() -> None:
     bundle = bundle_from(
         (
             evidence(
@@ -131,7 +133,10 @@ def test_uncertain_claims_do_not_create_positive_or_negative_recommendation() ->
 
     report = compose_deterministic_report("Which findings predict risk?", bundle)
 
-    assert "不能形成肯定或否定建议" in report.final_answer_markdown
+    assert "核心预后信息" in report.final_answer_markdown
+    assert "倾向于“是”" not in report.final_answer_markdown
+    assert "倾向于“否”" not in report.final_answer_markdown
+    assert "1 项声明的效应方向不确定" in report.final_answer_markdown
 
 
 def test_yes_no_question_receives_an_explicit_answer_in_the_conclusion() -> None:
@@ -207,3 +212,87 @@ def test_evidence_chain_keeps_boundary_claims_in_the_boundary_section_only() -> 
     assert "Grounded effectiveness finding from source 1" in evidence_chain
     assert "Grounded safety finding from source 2" not in evidence_chain
     assert "Grounded safety finding from source 2" in boundary_section
+
+
+def test_open_medication_question_returns_grounded_drug_options() -> None:
+    source, claim = evidence(
+        1,
+        "randomized_controlled_trial",
+        2025,
+        direction="uncertain",
+        aspect="effectiveness",
+        role="core",
+    )
+    claim = replace(
+        claim,
+        intervention="阿奇霉素",
+        dose="10 mg/kg/day",
+        statement="阿奇霉素可作为重症支原体肺炎的抗菌治疗药物。",
+        source_quote="阿奇霉素可作为重症支原体肺炎的抗菌治疗药物，剂量为10 mg/kg/day。",
+    )
+    claim_graph = LocalGraphBuilder().build("用药问题", (claim,)).as_dict()
+    bundle = EvidenceBundle(
+        sources=(source,),
+        graph=build_document_graph((source,), (claim,), claim_graph),
+        claims=(claim,),
+    )
+
+    report = compose_deterministic_report(
+        "重症支原体肺炎儿童要吃什么药？",
+        bundle,
+    )
+
+    assert "核心用药信息" in report.final_answer_markdown
+    assert "阿奇霉素（10 mg/kg/day）[1]" in report.final_answer_markdown
+    assert "不能形成肯定或否定建议" not in report.final_answer_markdown
+
+
+def test_medication_answer_normalizes_drug_names_from_grounded_ocr_text() -> None:
+    source, claim = evidence(
+        1,
+        "observational_study",
+        2024,
+        direction="uncertain",
+        aspect="effectiveness",
+        role="core",
+    )
+    claim = replace(
+        claim,
+        intervention="",
+        dose="",
+        statement="糖皮质 激素可以降低免疫介导的肺损伤。",
+        source_quote="糖皮质 激素可以降低免疫介导的肺损伤。",
+    )
+    claim_graph = LocalGraphBuilder().build("用药问题", (claim,)).as_dict()
+    bundle = EvidenceBundle(
+        sources=(source,),
+        graph=build_document_graph((source,), (claim,), claim_graph),
+        claims=(claim,),
+    )
+
+    report = compose_deterministic_report("儿童要吃什么药？", bundle)
+
+    direct_answer = report.final_answer_markdown.split("### 证据链", 1)[0]
+    assert "- 糖皮质激素[1]" in direct_answer
+    assert "可以降低免疫介导的肺损伤" not in direct_answer
+
+
+def test_open_prognosis_question_returns_grounded_findings_without_voting() -> None:
+    source, claim = evidence(
+        1,
+        "observational_study",
+        2025,
+        direction="uncertain",
+        aspect="prognosis",
+        role="core",
+    )
+    bundle = bundle_from(((source, claim),))
+
+    report = compose_deterministic_report(
+        "哪些指标可以预测难治性支原体肺炎？",
+        bundle,
+    )
+
+    assert "核心预后信息" in report.final_answer_markdown
+    assert claim.statement in report.final_answer_markdown
+    assert "不能形成肯定或否定建议" not in report.final_answer_markdown

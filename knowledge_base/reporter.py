@@ -407,6 +407,25 @@ class GroundedClaimExtractor:
             evidence_role = _closed_label(
                 raw_claim.get("evidence_role"), EVIDENCE_ROLES, "supplement"
             )
+            grounded_fields = {
+                field: _grounded_optional_text(raw_claim.get(field), source_quote)
+                for field in (
+                    "population",
+                    "intervention",
+                    "comparator",
+                    "design",
+                    "sample_size",
+                    "dose",
+                    "outcome",
+                    "follow_up",
+                )
+            }
+            effect_measures = _grounded_string_tuple(
+                raw_claim.get("effect_measures"), source_quote
+            )
+            limitations = _grounded_string_tuple(
+                raw_claim.get("limitations"), source_quote
+            )
             return (
                 EvidenceClaim(
                     claim_id=f"claim-{source_number}-{index}",
@@ -414,21 +433,21 @@ class GroundedClaimExtractor:
                     evidence_type=source.evidence_type,
                     year=source.year,
                     evidence_cutoff_year=cutoff,
-                    population="",
-                    intervention="",
-                    comparator="",
-                    outcome="",
+                    population=grounded_fields["population"],
+                    intervention=grounded_fields["intervention"],
+                    comparator=grounded_fields["comparator"],
+                    outcome=grounded_fields["outcome"],
                     direction=direction,
                     safety_signal=_quoted_safety_signal(source_quote) is True,
-                    design="",
-                    dose="",
-                    sample_size="",
-                    effect_measures=(),
-                    limitations=(),
+                    design=grounded_fields["design"],
+                    dose=grounded_fields["dose"],
+                    sample_size=grounded_fields["sample_size"],
+                    effect_measures=effect_measures,
+                    limitations=limitations,
                     statement=source_quote,
                     source_quote=source_quote,
                     source_chunk_ids=chunk_ids,
-                    follow_up="",
+                    follow_up=grounded_fields["follow_up"],
                     clinical_aspect=clinical_aspect,
                     evidence_role=evidence_role,
                 ),
@@ -1026,6 +1045,22 @@ def _claim_text_is_grounded(value: object, source_text: str) -> bool:
     if not tokens:
         return bool(values or _quantity_values(text))
     return all(token in source_normalized for token in tokens)
+
+
+def _grounded_optional_text(value: object, source_quote: str) -> str:
+    text = _optional_text(value)
+    if text and _claim_field_is_grounded(text, source_quote):
+        return text
+    return ""
+
+
+def _grounded_string_tuple(value: object, source_quote: str) -> tuple[str, ...]:
+    items = _string_tuple(value, allow_empty=True)
+    if items is None:
+        return ()
+    return tuple(
+        item for item in items if _claim_field_is_grounded(item, source_quote)
+    )
 
 
 def _claim_field_is_grounded(value: object, source_text: str) -> bool:
