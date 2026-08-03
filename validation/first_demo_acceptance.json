@@ -1,0 +1,27 @@
+{
+  "accepted_at": "2026-08-03",
+  "model_used": true,
+  "model_name": "deepseek-v4-flash",
+  "model_error": null,
+  "reasoning_step_count": 6,
+  "answer_nonempty": true,
+  "document_node_count": 10,
+  "relation_count": 12,
+  "relation_count_greater_than_zero": true,
+  "source_count": 15,
+  "retrieval_mode": "keyword",
+  "degraded_reason": "query_embedding_unavailable",
+  "visual_checks": {
+    "edge_label_count": 12,
+    "unrelated_node_path_collisions": 0,
+    "all_edges_visible_by_default": true,
+    "selected_node_count": 1,
+    "mobile_page_overflow": false,
+    "mobile_graph_scrolls_internally": true
+  },
+  "screenshots": [
+    "validation/first-demo-desktop.png",
+    "validation/first-demo-mobile.png"
+  ],
+  "contains_api_key": false
+}
