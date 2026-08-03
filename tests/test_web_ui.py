@@ -114,25 +114,87 @@ class FakeWorkbenchService:
             "graph": {
                 "nodes": [
                     {
-                        "node_id": "question",
-                        "node_type": "question",
-                        "label": "是否使用糖皮质激素",
-                        "payload": {},
+                        "node_id": "doc-guide",
+                        "node_type": "document",
+                        "label": "儿童肺炎诊疗指南",
+                        "payload": {
+                            "document_id": "doc-guide",
+                            "source_number": 2,
+                            "title": "儿童肺炎诊疗指南",
+                            "evidence_type": "guideline",
+                            "year": 2023,
+                            "quality": "moderate",
+                        },
                     },
                     {
-                        "node_id": "claim-1-1",
-                        "node_type": "claim",
-                        "label": "低剂量方案得到支持",
-                        "payload": {"evidence_type": "randomized_controlled_trial"},
+                        "node_id": "doc-review",
+                        "node_type": "document",
+                        "label": "糖皮质激素系统综述",
+                        "payload": {
+                            "document_id": "doc-review",
+                            "source_number": 3,
+                            "title": "糖皮质激素系统综述",
+                            "evidence_type": "systematic_review",
+                            "year": 2024,
+                            "quality": "moderate",
+                        },
+                    },
+                    {
+                        "node_id": "doc-1",
+                        "node_type": "document",
+                        "label": "不同剂量甲泼尼龙随机试验",
+                        "payload": {
+                            "document_id": "doc-1",
+                            "source_number": 1,
+                            "title": "不同剂量甲泼尼龙随机试验",
+                            "evidence_type": "randomized_controlled_trial",
+                            "year": 2025,
+                            "quality": "high",
+                        },
+                    },
+                    {
+                        "node_id": "doc-case",
+                        "node_type": "document",
+                        "label": "复杂并发症病例报告",
+                        "payload": {
+                            "document_id": "doc-case",
+                            "source_number": 4,
+                            "title": "复杂并发症病例报告",
+                            "evidence_type": "case_report",
+                            "year": 2025,
+                            "quality": "very_low",
+                        },
                     },
                 ],
                 "edges": [
                     {
-                        "source": "claim-1-1",
-                        "target": "question",
+                        "source": "doc-review",
+                        "target": "doc-guide",
+                        "relation": "supports",
+                        "rationale": "系统综述支持指南方向",
+                        "source_claim_ids": ["claim-review", "claim-guide"],
+                    },
+                    {
+                        "source": "doc-1",
+                        "target": "doc-guide",
                         "relation": "updates",
                         "rationale": "较新的RCT更新指南窗口",
-                    }
+                        "source_claim_ids": ["claim-rct", "claim-guide"],
+                    },
+                    {
+                        "source": "doc-1",
+                        "target": "doc-review",
+                        "relation": "confirms",
+                        "rationale": "随机试验确认汇总证据方向",
+                        "source_claim_ids": ["claim-rct", "claim-review"],
+                    },
+                    {
+                        "source": "doc-case",
+                        "target": "doc-guide",
+                        "relation": "cautions",
+                        "rationale": "病例报告补充特殊并发症警示",
+                        "source_claim_ids": ["claim-case", "claim-guide"],
+                    },
                 ],
             },
             "retrieval_stats": {"candidate_count": 18, "claim_count": 1},
@@ -522,7 +584,7 @@ def test_workbench_renders_grounded_sources_and_omits_empty_model_config() -> No
         assert service.query_call_count == 1
         assert "model_config" not in service.last_query_payload
         assert page.locator("[data-source-number='1']").count() >= 1
-        assert page.locator("#evidence-graph [data-node-id]").count() == 2
+        assert page.locator("#evidence-graph [data-node-id]").count() == 4
 
         page.locator("[data-source-number='1']").first.click()
         page.get_by_text("本次查询命中片段").wait_for()
@@ -545,6 +607,70 @@ def test_workbench_renders_grounded_sources_and_omits_empty_model_config() -> No
         )
         assert detail_metrics["overflowY"] == "auto"
         assert detail_metrics["scrollHeight"] > detail_metrics["clientHeight"]
+        browser.close()
+
+
+def test_first_demo_document_graph_renders_and_links_to_sources() -> None:
+    service = FakeWorkbenchService()
+    with running_server(service) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.goto(base_url)
+        page.get_by_text("35,408").wait_for()
+
+        page.get_by_role("button", name="开始循证分析").click()
+        page.get_by_text("推荐优先采用低剂量方案").wait_for()
+
+        graph = page.locator("#evidence-graph")
+        assert graph.locator("[data-node-type='document']").count() == 4
+        assert graph.locator(".graph-edge").count() == 4
+        assert graph.locator(".edge-label").count() == 4
+        assert graph.locator(".lane-title").get_by_text("指南", exact=True).is_visible()
+        assert graph.locator(".lane-title").get_by_text(
+            "随机对照试验（RCT）", exact=True
+        ).is_visible()
+        assert graph.get_by_text("支持", exact=True).is_visible()
+        assert graph.get_by_text("更新", exact=True).is_visible()
+        assert graph.get_by_text("确认", exact=True).is_visible()
+        assert graph.get_by_text("警示", exact=True).is_visible()
+
+        graph.locator("[data-source-number='1']").click()
+        page.get_by_text("本次查询命中片段").wait_for()
+        assert graph.locator(".graph-node.is-selected").count() == 1
+        assert graph.locator(".graph-node.is-muted").count() >= 1
+        assert all(
+            opacity > 0
+            for opacity in graph.locator(".graph-edge").evaluate_all(
+                "elements => elements.map(element => Number(getComputedStyle(element).opacity))"
+            )
+        )
+        browser.close()
+
+
+def test_document_graph_scrolls_inside_mobile_frame_without_page_overflow() -> None:
+    with running_server(FakeWorkbenchService()) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        page.goto(base_url)
+        page.get_by_text("35,408").wait_for()
+        page.get_by_role("button", name="开始循证分析").click()
+        page.get_by_text("推荐优先采用低剂量方案").wait_for()
+
+        metrics = page.locator(".graph-frame").evaluate(
+            """element => ({
+                clientWidth: element.clientWidth,
+                scrollWidth: element.scrollWidth,
+                overflowX: getComputedStyle(element).overflowX,
+            })"""
+        )
+        assert metrics["overflowX"] in {"auto", "scroll"}
+        assert metrics["scrollWidth"] > metrics["clientWidth"]
+        assert page.evaluate(
+            "document.documentElement.scrollWidth > document.documentElement.clientWidth"
+        ) is False
+        assert page.locator("#evidence-graph .node-title").evaluate_all(
+            "elements => elements.every(element => element.textContent.trim().length > 0)"
+        )
         browser.close()
 
 

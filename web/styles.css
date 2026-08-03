@@ -828,6 +828,7 @@ h3 {
 
 .relation-legend [data-relation="updates"] i { background: var(--blue); }
 .relation-legend [data-relation="supplements"] i { background: var(--amber); }
+.relation-legend [data-relation="confirms"] i { background: #6f5b7c; }
 .relation-legend [data-relation="conflicts"] i { background: var(--red); }
 .relation-legend [data-relation="cautions"] i { background: var(--violet); }
 
@@ -837,7 +838,9 @@ h3 {
   min-height: 390px;
   aspect-ratio: 16 / 9;
   position: relative;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
   border: 1px solid var(--soft-line);
   background: #f9fbfa;
 }
@@ -864,32 +867,87 @@ h3 {
 }
 
 .graph-edge {
+  fill: none;
   stroke-width: 2.2;
   opacity: 0.8;
+  transition: opacity 140ms ease;
 }
 
 .graph-edge[data-relation="supports"] { stroke: var(--teal); }
 .graph-edge[data-relation="updates"] { stroke: var(--blue); }
 .graph-edge[data-relation="supplements"] { stroke: var(--amber); stroke-dasharray: 6 4; }
+.graph-edge[data-relation="confirms"] { stroke: #6f5b7c; }
 .graph-edge[data-relation="conflicts"] { stroke: var(--red); stroke-dasharray: 3 3; }
 .graph-edge[data-relation="cautions"] { stroke: var(--violet); stroke-dasharray: 8 4; }
+
+.graph-edge.is-muted,
+.edge-label.is-muted {
+  opacity: 0.12;
+}
+
+.edge-label {
+  font-size: 10px;
+  font-weight: 750;
+  paint-order: stroke;
+  pointer-events: none;
+  stroke: #f9fbfa;
+  stroke-width: 4px;
+  stroke-linejoin: round;
+  transition: opacity 140ms ease;
+}
+
+.lane-title {
+  font-size: 11px;
+  font-weight: 800;
+  pointer-events: none;
+}
+
+.graph-node {
+  cursor: pointer;
+  transition: opacity 140ms ease;
+}
 
 .graph-node rect {
   stroke-width: 1.5;
   rx: 5;
+  transition: stroke-width 140ms ease, filter 140ms ease;
 }
 
-.graph-node text {
+.graph-node:hover rect,
+.graph-node.is-selected rect {
+  stroke-width: 3;
+  filter: drop-shadow(0 4px 5px rgba(30, 54, 43, 0.17));
+}
+
+.graph-node.is-muted {
+  opacity: 0.3;
+}
+
+.graph-node:focus-visible {
+  outline: 3px solid rgba(49, 95, 117, 0.24);
+  outline-offset: 2px;
+}
+
+.node-type {
+  font-size: 9px;
+  font-weight: 800;
+  pointer-events: none;
+}
+
+.node-title {
   fill: #20332d;
-  font-size: 13px;
+  font-size: 10px;
   font-weight: 700;
   pointer-events: none;
 }
 
-.graph-node[data-node-type="question"] rect { fill: #e4f4ef; stroke: var(--teal); }
-.graph-node[data-node-type="document"] rect { fill: #e8eff9; stroke: var(--blue); }
-.graph-node[data-node-type="claim"] rect { fill: #fff3da; stroke: var(--amber); }
-.graph-node[data-node-type="outcome"] rect { fill: #f4eefa; stroke: var(--violet); }
+.node-year {
+  fill: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+  text-anchor: end;
+  pointer-events: none;
+}
 
 .count-badge {
   min-width: 32px;

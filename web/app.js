@@ -23,8 +23,28 @@ const RELATION_LABELS = {
   supports: "支持",
   updates: "更新",
   supplements: "补充",
+  confirms: "确认",
   conflicts: "冲突",
   cautions: "警示",
+};
+
+const TYPE_STYLES = {
+  guideline: { color: "#176b4d", soft: "#e8f3ed" },
+  systematic_review: { color: "#315f75", soft: "#eaf1f5" },
+  randomized_controlled_trial: { color: "#a56713", soft: "#fff3dd" },
+  observational_study: { color: "#6f5b7c", soft: "#f1edf4" },
+  narrative_review: { color: "#68746e", soft: "#f0f3f1" },
+  case_report: { color: "#a3443d", soft: "#faecea" },
+  unknown: { color: "#59645f", soft: "#f0f3f1" },
+};
+
+const RELATION_STYLES = {
+  supports: { color: "#176b4d", label: "支持" },
+  updates: { color: "#a56713", label: "更新" },
+  supplements: { color: "#315f75", label: "补充" },
+  confirms: { color: "#6f5b7c", label: "确认" },
+  conflicts: { color: "#b0303b", label: "冲突" },
+  cautions: { color: "#a3443d", label: "警示" },
 };
 
 const STAGE_LABELS = {
@@ -56,6 +76,8 @@ const state = {
   modelStatus: null,
   startupFailed: false,
   result: null,
+  graph: { nodes: [], edges: [] },
+  selectedGraphNodeId: null,
   sources: new Map(),
   activeSource: null,
   currentJobId: null,
@@ -377,6 +399,7 @@ async function runQuery() {
       body: JSON.stringify(payload),
     });
     state.result = result;
+    state.selectedGraphNodeId = null;
     indexSources(result.sources || []);
     renderReport(result);
     renderSources(result.sources || []);
@@ -749,123 +772,333 @@ function pageRange(start, end) {
   return start === end || !end ? String(start) : `${start}–${end}`;
 }
 
-function renderGraph(graph) {
-  const rawNodes = Array.isArray(graph.nodes) ? graph.nodes : [];
-  const rawEdges = Array.isArray(graph.edges) ? graph.edges : [];
-  const nodes = rawNodes.slice(0, 24).map(normalizeGraphNode);
+function renderGraph(graph = state.graph) {
+  const rawGraph = graph && typeof graph === "object" ? graph : { nodes: [], edges: [] };
+  state.graph = rawGraph;
+  const nodes = (Array.isArray(rawGraph.nodes) ? rawGraph.nodes : [])
+    .slice(0, 10)
+    .map(normalizeGraphNode)
+    .filter((node) => node.type === "document");
   const visibleIds = new Set(nodes.map((node) => node.id));
-  const edges = rawEdges
-    .map((edge) => ({ ...edge, relation: edge.relation === "confirms" ? "supports" : edge.relation }))
-    .filter((edge) => visibleIds.has(String(edge.source)) && visibleIds.has(String(edge.target)));
+  const edges = (Array.isArray(rawGraph.edges) ? rawGraph.edges : [])
+    .map((edge) => ({
+      ...edge,
+      source: String(edge.source),
+      target: String(edge.target),
+      relation: String(edge.relation || "supplements"),
+    }))
+    .filter((edge) => (
+      visibleIds.has(edge.source)
+      && visibleIds.has(edge.target)
+      && RELATION_STYLES[edge.relation]
+    ));
+
   dom.graph.replaceChildren();
-  dom.graphMeta.textContent = `${nodes.length} 个节点 · ${edges.length} 条关系`;
+  dom.graphMeta.textContent = `${nodes.length} 篇文献 · ${edges.length} 条关系 · 按证据层级布局`;
   if (!nodes.length) {
     dom.graphEmpty.hidden = false;
+    dom.graph.removeAttribute("style");
+    dom.graph.setAttribute("viewBox", "0 0 760 360");
     return;
   }
   dom.graphEmpty.hidden = true;
-  const layerCounts = new Map();
-  nodes.forEach((node) => layerCounts.set(node.type, (layerCounts.get(node.type) || 0) + 1));
-  const widestRow = Math.min(5, Math.max(...layerCounts.values()));
-  const compactViewport = dom.graph.clientWidth < 500;
-  const viewWidth = widestRow <= 2 ? (compactViewport ? 480 : 640) : widestRow === 3 ? 760 : 1000;
-  const positions = graphLayout(nodes, viewWidth);
-  const height = Math.max(420, Math.max(...Array.from(positions.values()).map((value) => value.y)) + 90);
-  dom.graph.setAttribute("viewBox", `0 0 ${viewWidth} ${height}`);
-  dom.graph.setAttribute("preserveAspectRatio", "xMidYMid meet");
 
+  const evidenceTypes = TYPE_ORDER
+    .concat(["unknown"])
+    .filter((type) => nodes.some((node) => node.evidenceType === type));
+  const laneWidth = 176;
+  const nodeWidth = 134;
+  const nodeHeight = 78;
+  const laneGap = 42;
+  const topOffset = 92;
+  const maxRows = Math.max(...evidenceTypes.map((type) => (
+    nodes.filter((node) => node.evidenceType === type).length
+  )));
+  const longEdgeCount = edges.filter((edge) => {
+    const sourceType = nodes.find((node) => node.id === edge.source)?.evidenceType;
+    const targetType = nodes.find((node) => node.id === edge.target)?.evidenceType;
+    return Math.abs(evidenceTypes.indexOf(sourceType) - evidenceTypes.indexOf(targetType)) > 1;
+  }).length;
+  const routeBands = Math.min(3, Math.max(1, Math.ceil(longEdgeCount / 2)));
+  const contentBottom = topOffset + maxRows * (nodeHeight + 34);
+  const viewWidth = Math.max(760, evidenceTypes.length * laneWidth + laneGap * 2);
+  const viewHeight = Math.max(360, contentBottom + 48 + routeBands * 20);
+  dom.graph.setAttribute("viewBox", `0 0 ${viewWidth} ${viewHeight}`);
+  dom.graph.setAttribute("preserveAspectRatio", "xMinYMin meet");
+  dom.graph.style.minWidth = `${viewWidth}px`;
+  dom.graph.style.height = `${viewHeight}px`;
+
+  const defs = svgElement("defs");
+  Object.entries(RELATION_STYLES).forEach(([relation, style]) => {
+    const marker = svgElement("marker", {
+      id: `arrow-${relation}`,
+      viewBox: "0 0 8 8",
+      refX: "7",
+      refY: "4",
+      markerWidth: "6",
+      markerHeight: "6",
+      orient: "auto-start-reverse",
+    });
+    marker.append(svgElement("path", {
+      d: "M 0 0 L 8 4 L 0 8 z",
+      fill: style.color,
+    }));
+    defs.append(marker);
+  });
+  dom.graph.append(defs);
+
+  const positions = new Map();
+  evidenceTypes.forEach((evidenceType, laneIndex) => {
+    const x = laneGap + laneIndex * laneWidth;
+    const laneTitle = svgElement("text", {
+      x: String(x + nodeWidth / 2),
+      y: "28",
+      class: "lane-title",
+      fill: typeStyle(evidenceType).color,
+      "text-anchor": "middle",
+    });
+    laneTitle.textContent = TYPE_LABELS[evidenceType] || "未分类";
+    dom.graph.append(laneTitle);
+    nodes
+      .filter((node) => node.evidenceType === evidenceType)
+      .sort((left, right) => left.sourceNumber - right.sourceNumber || left.id.localeCompare(right.id))
+      .forEach((node, rowIndex) => {
+        positions.set(node.id, {
+          x,
+          y: topOffset + rowIndex * (nodeHeight + 34),
+          width: nodeWidth,
+          height: nodeHeight,
+          laneIndex,
+        });
+      });
+  });
+
+  const connected = connectedNodeIds(state.selectedGraphNodeId, edges);
+  let longEdgeIndex = 0;
   edges.forEach((edge) => {
-    const source = positions.get(String(edge.source));
-    const target = positions.get(String(edge.target));
+    const source = positions.get(edge.source);
+    const target = positions.get(edge.target);
     if (!source || !target) return;
-    const line = svgElement("line");
-    line.classList.add("graph-edge");
-    line.dataset.relation = edge.relation || "supports";
-    line.setAttribute("x1", source.x);
-    line.setAttribute("y1", source.y);
-    line.setAttribute("x2", target.x);
-    line.setAttribute("y2", target.y);
+    const style = relationStyleFor(edge.relation);
+    const laneDistance = Math.abs(source.laneIndex - target.laneIndex);
+    const routeIndex = laneDistance > 1 ? longEdgeIndex++ : 0;
+    const geometry = edgeGeometry(
+      source,
+      target,
+      routeIndex,
+      contentBottom,
+      laneDistance > 1,
+    );
+    const path = svgElement("path", {
+      d: geometry.path,
+      class: "graph-edge",
+      stroke: style.color,
+      "marker-end": `url(#arrow-${edge.relation})`,
+      "data-relation": edge.relation,
+      "data-source": edge.source,
+      "data-target": edge.target,
+    });
+    const isMuted = state.selectedGraphNodeId
+      && edge.source !== state.selectedGraphNodeId
+      && edge.target !== state.selectedGraphNodeId;
+    if (isMuted) path.classList.add("is-muted");
     const title = svgElement("title");
-    title.textContent = `${RELATION_LABELS[edge.relation] || edge.relation || "关系"}：${edge.rationale || ""}`;
-    line.append(title);
-    dom.graph.append(line);
+    title.textContent = `${style.label}：${edge.rationale || "文献间证据关系"}`;
+    path.append(title);
+    dom.graph.append(path);
+
+    const label = svgElement("text", {
+      x: String(geometry.labelX),
+      y: String(geometry.labelY),
+      class: "edge-label",
+      fill: style.color,
+      "text-anchor": "middle",
+      "data-relation": edge.relation,
+    });
+    if (isMuted) label.classList.add("is-muted");
+    label.textContent = style.label;
+    dom.graph.append(label);
   });
 
   nodes.forEach((node) => {
     const position = positions.get(node.id);
-    const group = svgElement("g");
-    group.classList.add("graph-node");
-    group.dataset.nodeId = node.id;
-    group.dataset.nodeType = node.type;
-    group.setAttribute("transform", `translate(${position.x - 76} ${position.y - 27})`);
-    const rect = svgElement("rect");
-    rect.setAttribute("width", "152");
-    rect.setAttribute("height", "54");
-    const label = svgElement("text");
-    label.setAttribute("x", "76");
-    label.setAttribute("y", "22");
-    label.setAttribute("text-anchor", "middle");
-    wrapSvgLabel(label, node.label);
+    if (!position) return;
+    const style = typeStyle(node.evidenceType);
+    const group = svgElement("g", {
+      class: "graph-node",
+      role: "button",
+      tabindex: "0",
+      "aria-label": `${TYPE_LABELS[node.evidenceType] || "文献"}：${node.title}`,
+      "data-node-id": node.id,
+      "data-node-type": "document",
+    });
+    if (Number.isInteger(node.sourceNumber)) {
+      group.dataset.sourceNumber = String(node.sourceNumber);
+    }
+    if (node.id === state.selectedGraphNodeId) {
+      group.classList.add("is-selected");
+    } else if (state.selectedGraphNodeId && !connected.has(node.id)) {
+      group.classList.add("is-muted");
+    }
+    group.append(svgElement("rect", {
+      x: String(position.x),
+      y: String(position.y),
+      width: String(position.width),
+      height: String(position.height),
+      rx: "5",
+      fill: style.soft,
+      stroke: style.color,
+    }));
+
+    const typeText = svgElement("text", {
+      x: String(position.x + 10),
+      y: String(position.y + 18),
+      class: "node-type",
+      fill: style.color,
+    });
+    typeText.textContent = compactTypeLabel(node.evidenceType);
+    group.append(typeText);
+
+    const yearText = svgElement("text", {
+      x: String(position.x + position.width - 9),
+      y: String(position.y + 18),
+      class: "node-year",
+    });
+    yearText.textContent = node.year || "年份未知";
+    group.append(yearText);
+
+    const titleText = svgElement("text", {
+      x: String(position.x + 10),
+      y: String(position.y + 42),
+      class: "node-title",
+    });
+    splitTitle(node.title, 13, 2).forEach((line, index) => {
+      const tspan = svgElement("tspan", {
+        x: String(position.x + 10),
+        dy: index === 0 ? "0" : "16",
+      });
+      tspan.textContent = line;
+      titleText.append(tspan);
+    });
+    group.append(titleText);
     const title = svgElement("title");
-    title.textContent = node.label;
-    group.append(rect, label, title);
+    title.textContent = node.title;
+    group.append(title);
+
+    const activate = () => {
+      state.selectedGraphNodeId = node.id;
+      renderGraph();
+      if (Number.isInteger(node.sourceNumber)) selectSource(node.sourceNumber);
+    };
+    group.addEventListener("click", activate);
+    group.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        activate();
+      }
+    });
     dom.graph.append(group);
   });
 }
 
 function normalizeGraphNode(node) {
   const id = String(node.node_id ?? node.id ?? "unknown");
-  const payload = node.payload || {};
+  const payload = node.payload && typeof node.payload === "object" ? node.payload : {};
   return {
     id,
-    type: String(node.node_type || payload.node_type || (id === "question" ? "question" : "document")),
-    label: String(node.label || node.title || payload.title || id),
+    type: String(node.node_type || payload.node_type || "document"),
+    title: String(payload.title || node.label || node.title || id),
+    evidenceType: String(payload.evidence_type || node.evidence_type || "unknown"),
+    year: payload.year ?? node.year ?? "",
+    quality: String(payload.quality || node.quality || "unknown"),
+    sourceNumber: Number(payload.source_number ?? node.source_number),
   };
 }
 
-function graphLayout(nodes, viewWidth) {
-  const layers = ["question", "document", "claim", "outcome"];
-  const grouped = new Map(layers.map((layer) => [layer, []]));
-  nodes.forEach((node) => {
-    const layer = grouped.has(node.type) ? node.type : "document";
-    grouped.get(layer).push(node);
-  });
-  const positions = new Map();
-  let y = 55;
-  layers.forEach((layer) => {
-    const items = grouped.get(layer);
-    if (!items.length) return;
-    for (let start = 0; start < items.length; start += 5) {
-      const row = items.slice(start, start + 5);
-      const spacing = (viewWidth - 120) / row.length;
-      row.forEach((node, index) => {
-        positions.set(node.id, { x: 60 + spacing * (index + 0.5), y });
-      });
-      y += 92;
-    }
-  });
-  return positions;
+function typeStyle(evidenceType) {
+  return TYPE_STYLES[evidenceType] || TYPE_STYLES.unknown;
 }
 
-function wrapSvgLabel(textNode, label) {
-  const clean = String(label).replace(/\s+/g, " ").trim();
-  const first = clean.slice(0, 18);
-  const second = clean.length > 18 ? `${clean.slice(18, 34)}${clean.length > 34 ? "…" : ""}` : "";
-  const firstLine = svgElement("tspan");
-  firstLine.setAttribute("x", "76");
-  firstLine.textContent = first;
-  textNode.append(firstLine);
-  if (second) {
-    const secondLine = svgElement("tspan");
-    secondLine.setAttribute("x", "76");
-    secondLine.setAttribute("dy", "16");
-    secondLine.textContent = second;
-    textNode.append(secondLine);
+function relationStyleFor(relation) {
+  return RELATION_STYLES[relation] || RELATION_STYLES.supplements;
+}
+
+function compactTypeLabel(evidenceType) {
+  return {
+    randomized_controlled_trial: "RCT",
+    observational_study: "观察性",
+    narrative_review: "叙述综述",
+    systematic_review: "系统综述",
+  }[evidenceType] || TYPE_LABELS[evidenceType] || "未分类";
+}
+
+function connectedNodeIds(selectedId, edges) {
+  const connected = new Set(selectedId ? [selectedId] : []);
+  if (!selectedId) return connected;
+  edges.forEach((edge) => {
+    if (edge.source === selectedId) connected.add(edge.target);
+    if (edge.target === selectedId) connected.add(edge.source);
+  });
+  return connected;
+}
+
+function edgeGeometry(source, target, routeIndex, contentBottom, useOuterRoute) {
+  const movingLeft = source.x > target.x;
+  const x1 = movingLeft ? source.x : source.x + source.width;
+  const x2 = movingLeft ? target.x + target.width : target.x;
+  const y1 = source.y + source.height / 2;
+  const y2 = target.y + target.height / 2;
+  const direction = movingLeft ? -1 : 1;
+  if (!useOuterRoute) {
+    const bend = Math.max(34, Math.abs(x2 - x1) * 0.42);
+    return {
+      path: `M ${x1} ${y1} C ${x1 + direction * bend} ${y1}, ${x2 - direction * bend} ${y2}, ${x2} ${y2}`,
+      labelX: (x1 + x2) / 2,
+      labelY: (y1 + y2) / 2 - 7,
+    };
   }
+  const upperRoute = routeIndex % 2 === 0;
+  const channel = Math.floor(routeIndex / 2) % 3;
+  const routeY = upperRoute ? 58 - channel * 18 : contentBottom + 24 + channel * 18;
+  const exit = 28 * direction;
+  const path = [
+    `M ${x1} ${y1}`,
+    `C ${x1 + exit} ${y1}, ${x1 + exit} ${routeY}, ${x1 + exit * 1.8} ${routeY}`,
+    `L ${x2 - exit * 1.8} ${routeY}`,
+    `C ${x2 - exit} ${routeY}, ${x2 - exit} ${y2}, ${x2} ${y2}`,
+  ].join(" ");
+  return {
+    path,
+    labelX: (x1 + x2) / 2,
+    labelY: routeY - 6,
+  };
 }
 
-function svgElement(name) {
-  return document.createElementNS("http://www.w3.org/2000/svg", name);
+function splitTitle(value, maxCharacters, maxLines) {
+  const clean = String(value || "未命名文献").replace(/\s+/g, " ").trim();
+  const lines = [];
+  let remaining = clean;
+  while (remaining && lines.length < maxLines) {
+    if (remaining.length <= maxCharacters) {
+      lines.push(remaining);
+      remaining = "";
+      break;
+    }
+    let splitAt = remaining.lastIndexOf(" ", maxCharacters);
+    if (splitAt < Math.floor(maxCharacters * 0.55)) splitAt = maxCharacters;
+    lines.push(remaining.slice(0, splitAt).trim());
+    remaining = remaining.slice(splitAt).trim();
+  }
+  if (remaining && lines.length) {
+    lines[lines.length - 1] = `${lines[lines.length - 1].slice(0, maxCharacters - 1)}…`;
+  }
+  return lines.length ? lines : ["未命名文献"];
+}
+
+function svgElement(name, attributes = {}) {
+  const element = document.createElementNS("http://www.w3.org/2000/svg", name);
+  Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, value));
+  return element;
 }
 
 async function continueEmbedding() {
