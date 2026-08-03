@@ -100,7 +100,9 @@ class SequencedChat:
         return self.responses.pop(0)
 
 
-def make_grounded_pipeline(chat_client) -> ProductionQueryPipeline:
+def make_grounded_pipeline(
+    chat_client, *, include_unselected_document: bool = False
+) -> ProductionQueryPipeline:
     text = (
         "Randomized controlled trial in SMPP children. Low dose "
         "methylprednisolone with antibiotics was supported for fever duration."
@@ -121,6 +123,23 @@ def make_grounded_pipeline(chat_client) -> ProductionQueryPipeline:
         supporting_hits=(hit,),
         payload={"title": "Randomized controlled trial", "year": 2025},
     )
+    extra_hit = RankedHit(
+        record_id="chunk-2",
+        document_id="doc-2",
+        source="keyword_fulltext",
+        rank=2,
+        score=0.4,
+        text="A risk prediction nomogram was developed for hospitalized children.",
+        payload={"page_start": 2, "page_end": 2},
+    )
+    extra_document = RetrievedDocument(
+        document_id="doc-2",
+        fused_score=0.5,
+        final_score=0.4,
+        supporting_hits=(extra_hit,),
+        payload={"title": "Risk prediction nomogram", "year": 2024},
+    )
+    documents = (document, extra_document) if include_unselected_document else (document,)
     context = QueryContext(
         raw_question="question",
         normalized_fts_query="question",
@@ -137,10 +156,19 @@ def make_grounded_pipeline(chat_client) -> ProductionQueryPipeline:
 
     class Retriever:
         def search(self, question, filters):
-            return RetrievalResult("hybrid", "", (document,), 1, context)
+            return RetrievalResult("hybrid", "", documents, len(documents), context)
 
     class Documents:
         def document_detail(self, document_id):
+            if document_id == "doc-2":
+                return {
+                    "title": "Risk prediction nomogram",
+                    "abstract": "Prediction model abstract",
+                    "year": 2024,
+                    "evidence_type": "observational_study",
+                    "classification_confidence": 0.9,
+                    "quality": "moderate",
+                }
             return {
                 "title": "Randomized controlled trial",
                 "abstract": "Trial abstract",
@@ -374,6 +402,17 @@ def test_production_pipeline_request_chat_replaces_all_default_chat_components(
         pipeline.claim_extractor,
         pipeline.reporter,
     ) == default_components
+
+
+def test_model_selected_claims_are_not_supplemented_with_unselected_documents(
+) -> None:
+    chat = SequencedChat("request-model", *grounded_chat_responses())
+    pipeline = make_grounded_pipeline(chat, include_unselected_document=True)
+
+    result = pipeline.run("Should steroids be used?", SearchFilters())
+
+    assert result["retrieval_stats"]["claim_count"] == 1
+    assert "Risk prediction nomogram" not in result["answer_markdown"]
 
 
 def test_sequential_model_overrides_use_distinct_unchanged_clients(

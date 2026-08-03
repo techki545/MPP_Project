@@ -364,7 +364,7 @@ def test_quote_id_claim_downgrades_unknown_reasoning_labels() -> None:
     assert claim.evidence_role == "supplement"
 
 
-def test_partial_model_claims_are_completed_with_extractive_claims() -> None:
+def test_partial_model_claims_do_not_reintroduce_unselected_sources() -> None:
     first, first_detail = _document(
         1,
         title="First evidence source",
@@ -413,6 +413,7 @@ def test_partial_model_claims_are_completed_with_extractive_claims() -> None:
 
     result = pipeline.run("Clinical question", SearchFilters())
 
-    assert result["retrieval_stats"]["claim_count"] == 2
+    assert result["retrieval_stats"]["claim_count"] == 1
     assert len(result["graph"]["nodes"]) == 2
     assert result["graph"]["edges"] == []
+    assert "Second grounded evidence sentence" not in result["answer_markdown"]

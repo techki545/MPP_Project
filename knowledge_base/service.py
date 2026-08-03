@@ -27,7 +27,6 @@ from .reporter import (
     EvidenceSource,
     GroundedClaimExtractor,
     GroundedReporter,
-    ValidatedClaims,
     extractive_fallback_claims,
 )
 from .retriever import HybridRetriever
@@ -338,21 +337,9 @@ class ProductionQueryPipeline:
         claim_error: str | None = None
         try:
             validated = claim_extractor.extract(question, empty_bundle)
-            model_claim_count = len(validated.claims)
-            fallback = extractive_fallback_claims(sources)
-            accepted_documents = {claim.document_id for claim in validated.claims}
-            supplemental_claims = tuple(
-                claim
-                for claim in fallback.claims
-                if claim.document_id not in accepted_documents
-            )
-            if supplemental_claims or fallback.audit:
-                validated = ValidatedClaims(
-                    validated.claims + supplemental_claims,
-                    validated.audit + fallback.audit,
-                )
-            if model_claim_count == 0:
+            if not validated.claims:
                 claim_error = "claim_validation_empty"
+                validated = extractive_fallback_claims(sources)
         except KnowledgeBaseError as error:
             claim_error = error.code
             validated = extractive_fallback_claims(sources)

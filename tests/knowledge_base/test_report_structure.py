@@ -132,3 +132,78 @@ def test_uncertain_claims_do_not_create_positive_or_negative_recommendation() ->
     report = compose_deterministic_report("Which findings predict risk?", bundle)
 
     assert "不能形成肯定或否定建议" in report.final_answer_markdown
+
+
+def test_yes_no_question_receives_an_explicit_answer_in_the_conclusion() -> None:
+    bundle = bundle_from(
+        (evidence(1, "randomized_controlled_trial", 2025),)
+    )
+
+    report = compose_deterministic_report(
+        "重症支原体肺炎儿童是否应使用糖皮质激素？",
+        bundle,
+    )
+
+    first_paragraph = report.final_answer_markdown.split("\n\n", 2)[1]
+    assert "倾向于“是”" in first_paragraph
+    assert "重症支原体肺炎儿童是否应使用糖皮质激素" in first_paragraph
+
+
+def test_evidence_chain_excludes_unvalidated_sources_and_internal_citations() -> None:
+    source, claim = evidence(1, "randomized_controlled_trial", 2025)
+    unvalidated_source, _ = evidence(2, "observational_study", 2024)
+    claim = EvidenceClaim(
+        **{
+            **claim.__dict__,
+            "statement": "Earlier evidence [44] supports treatment.",
+            "source_quote": "Earlier evidence [44] supports treatment.",
+        }
+    )
+    claim_graph = LocalGraphBuilder().build("Clinical question", (claim,)).as_dict()
+    document_graph = build_document_graph(
+        (source, unvalidated_source),
+        (claim,),
+        claim_graph,
+    )
+    bundle = EvidenceBundle(
+        sources=(source, unvalidated_source),
+        graph=document_graph,
+        claims=(claim,),
+    )
+
+    report = compose_deterministic_report("Should treatment be used?", bundle)
+    evidence_chain = report.final_answer_markdown.split("### 证据链\n", 1)[1].split(
+        "\n\n### 时间更新", 1
+    )[0]
+
+    assert "[44]" not in evidence_chain
+    assert "[1]" in evidence_chain
+    assert unvalidated_source.title not in evidence_chain
+
+
+def test_evidence_chain_keeps_boundary_claims_in_the_boundary_section_only() -> None:
+    bundle = bundle_from(
+        (
+            evidence(1, "randomized_controlled_trial", 2025),
+            evidence(
+                2,
+                "observational_study",
+                2024,
+                direction="uncertain",
+                aspect="safety",
+                role="boundary",
+            ),
+        )
+    )
+
+    report = compose_deterministic_report("Should treatment be used?", bundle)
+    evidence_chain = report.final_answer_markdown.split("### 证据链\n", 1)[1].split(
+        "\n\n### 时间更新", 1
+    )[0]
+    boundary_section = report.final_answer_markdown.split(
+        "### 安全性与适用边界\n", 1
+    )[1].split("\n\n### 证据缺口", 1)[0]
+
+    assert "Grounded effectiveness finding from source 1" in evidence_chain
+    assert "Grounded safety finding from source 2" not in evidence_chain
+    assert "Grounded safety finding from source 2" in boundary_section

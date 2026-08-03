@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -88,6 +89,7 @@ def compose_deterministic_report(
         claims_by_document,
     )
     answer = _compose_conclusion_first_answer(
+        question,
         bundle,
         grouped,
         relation_counts,
@@ -175,49 +177,86 @@ def _compose_first_demo_steps(
 
 
 def _compose_conclusion_first_answer(
+    question: str,
     bundle: EvidenceBundle,
     grouped: dict[str, tuple[EvidenceSource, ...]],
     relation_counts: Counter[str],
     claims_by_document: dict[str, list[EvidenceClaim]],
 ) -> str:
-    directions = Counter(claim.direction for claim in bundle.claims)
+    relevant_aspects = _question_aspects(question)
+    decision_claims = tuple(
+        claim
+        for claim in bundle.claims
+        if claim.evidence_role == "core"
+        and claim.clinical_aspect in relevant_aspects
+    )
+    directions = Counter(claim.direction for claim in decision_claims)
+    clean_question = " ".join(question.split()).rstrip("?？")
+    yes_no_question = bool(
+        re.search(r"是否|应否|能否|可否|要不要|该不该|\b(?:should|whether|can)\b", question, re.I)
+    )
     directional_sources = [
         source.source_number
         for source in bundle.sources
         if any(
             claim.direction != "uncertain"
-            for claim in claims_by_document.get(source.document_id, [])
+            for claim in decision_claims
+            if claim.document_id == source.document_id
         )
     ]
     citation_suffix = "".join(f"[{number}]" for number in directional_sources)
     if not directions or directions["supports"] + directions["opposes"] == 0:
-        conclusion = (
-            "**结论：当前可验证声明没有提供足够的方向信息，不能形成肯定或否定建议。**"
-        )
+        if yes_no_question:
+            conclusion = f"**结论：对于“{clean_question}”，当前证据不足，不能回答“是”或“否”。**"
+        else:
+            conclusion = "**结论：当前可验证声明没有提供足够的方向信息，不能形成肯定或否定建议。**"
     elif directions["supports"] > directions["opposes"] and not relation_counts[
         "conflicts"
     ]:
-        conclusion = (
-            "**结论：现有检索证据总体支持问题所聚焦的临床判断，但仍需结合"
-            f"安全性、适用人群和证据缺口审慎解释。**{citation_suffix}"
-        )
+        if yes_no_question:
+            conclusion = (
+                f"**结论：对于“{clean_question}”，当前证据倾向于“是”，即总体支持题述做法；"
+                f"但仍需结合安全性、适用人群和证据缺口审慎决策。**{citation_suffix}"
+            )
+        else:
+            conclusion = (
+                "**结论：现有检索证据总体支持问题所聚焦的临床判断，但仍需结合"
+                f"安全性、适用人群和证据缺口审慎解释。**{citation_suffix}"
+            )
     elif directions["opposes"] > directions["supports"] and not relation_counts[
         "conflicts"
     ]:
-        conclusion = (
-            "**结论：现有检索证据总体不支持问题所述临床判断，且仍需结合"
-            f"具体人群和证据局限审慎决策。**{citation_suffix}"
-        )
+        if yes_no_question:
+            conclusion = (
+                f"**结论：对于“{clean_question}”，当前证据倾向于“否”，即总体不支持题述做法；"
+                f"仍需结合具体人群和证据局限审慎决策。**{citation_suffix}"
+            )
+        else:
+            conclusion = (
+                "**结论：现有检索证据总体不支持问题所述临床判断，且仍需结合"
+                f"具体人群和证据局限审慎决策。**{citation_suffix}"
+            )
     else:
-        conclusion = (
-            "**结论：各来源的方向并不一致，当前证据不足以形成单一肯定或"
-            f"否定结论。**{citation_suffix}"
-        )
+        if yes_no_question:
+            conclusion = (
+                f"**结论：对于“{clean_question}”，各来源方向不一致，当前不能简单回答“是”或“否”。**"
+                f"{citation_suffix}"
+            )
+        else:
+            conclusion = (
+                "**结论：各来源的方向并不一致，当前证据不足以形成单一肯定或"
+                f"否定结论。**{citation_suffix}"
+            )
 
+    decision_document_ids = {claim.document_id for claim in decision_claims}
+    evidence_document_ids = decision_document_ids or {
+        claim.document_id for claim in bundle.claims
+    }
     evidence_lines = [
         _claim_line(source, claims_by_document)
         for evidence_type in _EVIDENCE_ORDER
         for source in grouped[evidence_type]
+        if source.document_id in evidence_document_ids
     ]
     evidence_chain = "\n".join(line for line in evidence_lines if line)
     if not evidence_chain:
@@ -251,6 +290,26 @@ def _compose_conclusion_first_answer(
     )
 
 
+def _question_aspects(question: str) -> set[str]:
+    normalized = " ".join(question.casefold().split())
+    specific_patterns = (
+        ("diagnosis", r"诊断|鉴别|确诊|diagnos"),
+        ("prognosis", r"预后|预测|危险因素|风险因素|predict|prognos|risk factor"),
+        ("safety", r"安全|不良反应|副作用|毒性|safety|adverse|harm"),
+        ("dose", r"剂量|用量|dose|mg/kg"),
+        ("timing", r"时机|何时|早期|晚期|timing|when|early"),
+        ("applicability", r"适用|人群|年龄|applicab|population"),
+    )
+    matched = {
+        aspect
+        for aspect, pattern in specific_patterns
+        if re.search(pattern, normalized, re.I)
+    }
+    if matched:
+        return {"overall", *matched}
+    return {"overall", "effectiveness", "dose", "timing"}
+
+
 def _evidence_level_body(
     sources: tuple[EvidenceSource, ...],
     claims_by_document: dict[str, list[EvidenceClaim]],
@@ -279,7 +338,9 @@ def _claim_line(
 ) -> str:
     claims = claims_by_document.get(source.document_id, [])
     if claims:
-        return f"- {claims[0].statement}[{source.source_number}]"
+        statement = re.sub(r"[\[［]\s*\d+\s*[\]］]", "", claims[0].statement)
+        statement = " ".join(statement.split())
+        return f"- {statement}[{source.source_number}]"
     year = str(source.year) if source.year is not None else "年份未知"
     return f"- 《{source.title}》（{year}）[{source.source_number}]"
 
