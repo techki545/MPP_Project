@@ -129,6 +129,7 @@ def test_document_graph_limits_nodes_and_retains_evidence_type_representatives()
         node["payload"]["evidence_type"] for node in graph["nodes"]
     }
     assert len(graph["nodes"]) == 10
+    assert len(graph["edges"]) <= 12
     assert represented_types == set(evidence_types)
     assert all(
         edge["source"] in node_ids and edge["target"] in node_ids

@@ -514,6 +514,30 @@ class GroundedReporter:
         analysis_steps, final_answer = self._validate_response(response, bundle)
         return self._build_report(analysis_steps, final_answer, bundle)
 
+    def generate_grounded_claim_report(
+        self,
+        question: str,
+        bundle: EvidenceBundle,
+        *,
+        model_used: bool,
+        model_error: str | None,
+    ) -> GeneratedReport:
+        """Render validated model claims without a second free-text model call."""
+        structured = compose_deterministic_report(question, bundle)
+        return GeneratedReport(
+            analysis_steps=structured.analysis_steps,
+            final_answer_markdown=structured.final_answer_markdown,
+            model_used=model_used,
+            model_name=str(
+                getattr(self.chat_client, "model", "configured-model")
+            ),
+            model_error=model_error,
+            evidence_inventory=tuple(
+                source.as_dict() for source in bundle.sources
+            ),
+            graph=dict(bundle.graph),
+        )
+
     def _request_report(self, question: str, bundle: EvidenceBundle) -> object:
         return self.chat_client.complete_json(
             _MODEL_REPORT_PROMPT,

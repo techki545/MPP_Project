@@ -814,12 +814,7 @@ function renderGraph(graph = state.graph) {
   const maxRows = Math.max(...evidenceTypes.map((type) => (
     nodes.filter((node) => node.evidenceType === type).length
   )));
-  const longEdgeCount = edges.filter((edge) => {
-    const sourceType = nodes.find((node) => node.id === edge.source)?.evidenceType;
-    const targetType = nodes.find((node) => node.id === edge.target)?.evidenceType;
-    return Math.abs(evidenceTypes.indexOf(sourceType) - evidenceTypes.indexOf(targetType)) > 1;
-  }).length;
-  const routeBands = Math.min(3, Math.max(1, Math.ceil(longEdgeCount / 2)));
+  const routeBands = Math.min(3, Math.max(1, Math.ceil(edges.length / 2)));
   const contentBottom = topOffset + maxRows * (nodeHeight + 34);
   const viewWidth = Math.max(760, evidenceTypes.length * laneWidth + laneGap * 2);
   const viewHeight = Math.max(360, contentBottom + 48 + routeBands * 20);
@@ -881,13 +876,14 @@ function renderGraph(graph = state.graph) {
     if (!source || !target) return;
     const style = relationStyleFor(edge.relation);
     const laneDistance = Math.abs(source.laneIndex - target.laneIndex);
-    const routeIndex = laneDistance > 1 ? longEdgeIndex++ : 0;
+    const useOuterRoute = laneDistance !== 1 || Math.abs(source.y - target.y) > 1;
+    const routeIndex = useOuterRoute ? longEdgeIndex++ : 0;
     const geometry = edgeGeometry(
       source,
       target,
       routeIndex,
       contentBottom,
-      laneDistance > 1,
+      useOuterRoute,
     );
     const path = svgElement("path", {
       d: geometry.path,
@@ -1043,12 +1039,17 @@ function connectedNodeIds(selectedId, edges) {
 }
 
 function edgeGeometry(source, target, routeIndex, contentBottom, useOuterRoute) {
+  const sameLane = source.laneIndex === target.laneIndex;
   const movingLeft = source.x > target.x;
-  const x1 = movingLeft ? source.x : source.x + source.width;
-  const x2 = movingLeft ? target.x + target.width : target.x;
+  const x1 = sameLane
+    ? source.x + source.width
+    : (movingLeft ? source.x : source.x + source.width);
+  const x2 = sameLane
+    ? target.x + target.width
+    : (movingLeft ? target.x + target.width : target.x);
   const y1 = source.y + source.height / 2;
   const y2 = target.y + target.height / 2;
-  const direction = movingLeft ? -1 : 1;
+  const direction = sameLane ? 1 : (movingLeft ? -1 : 1);
   if (!useOuterRoute) {
     const bend = Math.max(34, Math.abs(x2 - x1) * 0.42);
     return {
@@ -1060,12 +1061,13 @@ function edgeGeometry(source, target, routeIndex, contentBottom, useOuterRoute) 
   const upperRoute = routeIndex % 2 === 0;
   const channel = Math.floor(routeIndex / 2) % 3;
   const routeY = upperRoute ? 58 - channel * 18 : contentBottom + 24 + channel * 18;
-  const exit = 28 * direction;
+  const sourceGapX = x1 + 20 * direction;
+  const targetGapX = sameLane ? sourceGapX : x2 - 20 * direction;
   const path = [
     `M ${x1} ${y1}`,
-    `C ${x1 + exit} ${y1}, ${x1 + exit} ${routeY}, ${x1 + exit * 1.8} ${routeY}`,
-    `L ${x2 - exit * 1.8} ${routeY}`,
-    `C ${x2 - exit} ${routeY}, ${x2 - exit} ${y2}, ${x2} ${y2}`,
+    `C ${sourceGapX} ${y1}, ${sourceGapX} ${routeY}, ${sourceGapX} ${routeY}`,
+    `L ${targetGapX} ${routeY}`,
+    `C ${targetGapX} ${routeY}, ${targetGapX} ${y2}, ${x2} ${y2}`,
   ].join(" ");
   return {
     path,

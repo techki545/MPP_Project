@@ -21,6 +21,14 @@ _EVIDENCE_ORDER = (
 _EVIDENCE_RANK = {
     evidence_type: rank for rank, evidence_type in enumerate(_EVIDENCE_ORDER)
 }
+_RELATION_PRIORITY = {
+    "conflicts": 0,
+    "updates": 1,
+    "cautions": 2,
+    "supports": 3,
+    "confirms": 4,
+    "supplements": 5,
+}
 
 
 def build_document_graph(
@@ -117,12 +125,81 @@ def build_document_graph(
                 "rationale": entry["rationale"],
             }
         )
+    edges = _sparse_relation_network(edges, tuple(selected_ids))
 
     return {
         "question": str(claim_graph.get("question", "")).strip(),
         "nodes": nodes,
         "edges": edges,
     }
+
+
+def _sparse_relation_network(
+    edges: list[dict[str, Any]], node_ids: tuple[str, ...]
+) -> list[dict[str, Any]]:
+    max_edges = min(len(edges), len(node_ids) + 2)
+    if len(edges) <= max_edges:
+        return edges
+    ordered = sorted(
+        edges,
+        key=lambda edge: (
+            _RELATION_PRIORITY.get(str(edge["relation"]), 99),
+            str(edge["source"]),
+            str(edge["target"]),
+        ),
+    )
+    selected: list[dict[str, Any]] = []
+    selected_keys: set[tuple[str, str, str]] = set()
+
+    def add(edge: dict[str, Any]) -> None:
+        key = (str(edge["source"]), str(edge["target"]), str(edge["relation"]))
+        if key not in selected_keys and len(selected) < max_edges:
+            selected.append(edge)
+            selected_keys.add(key)
+
+    for relation in _RELATION_PRIORITY:
+        representative = next(
+            (edge for edge in ordered if edge["relation"] == relation),
+            None,
+        )
+        if representative is not None:
+            add(representative)
+
+    parent = {node_id: node_id for node_id in node_ids}
+
+    def find(node_id: str) -> str:
+        while parent[node_id] != node_id:
+            parent[node_id] = parent[parent[node_id]]
+            node_id = parent[node_id]
+        return node_id
+
+    def union(left: str, right: str) -> bool:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root == right_root:
+            return False
+        parent[right_root] = left_root
+        return True
+
+    for edge in selected:
+        union(str(edge["source"]), str(edge["target"]))
+    for edge in ordered:
+        if len(selected) >= max_edges:
+            break
+        if union(str(edge["source"]), str(edge["target"])):
+            add(edge)
+    for edge in ordered:
+        if len(selected) >= max_edges:
+            break
+        add(edge)
+    return sorted(
+        selected,
+        key=lambda edge: (
+            str(edge["source"]),
+            str(edge["target"]),
+            str(edge["relation"]),
+        ),
+    )
 
 
 def _select_sources(

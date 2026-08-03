@@ -674,6 +674,79 @@ def test_document_graph_scrolls_inside_mobile_frame_without_page_overflow() -> N
         browser.close()
 
 
+def test_graph_edges_do_not_cross_unrelated_document_nodes() -> None:
+    def node(identifier: str, evidence_type: str, number: int, title: str) -> dict:
+        return {
+            "node_id": identifier,
+            "node_type": "document",
+            "label": title,
+            "payload": {
+                "document_id": identifier,
+                "source_number": number,
+                "title": title,
+                "evidence_type": evidence_type,
+                "year": 2025,
+                "quality": "moderate",
+            },
+        }
+
+    graph = {
+        "nodes": [
+            node("guide-a", "guideline", 2, "Guide A"),
+            node("guide-b", "guideline", 3, "Guide B"),
+            node("review-a", "systematic_review", 4, "Review A"),
+            node("review-b", "systematic_review", 5, "Review B"),
+            node("review-c", "systematic_review", 7, "Review C"),
+            node("trial-a", "randomized_controlled_trial", 1, "Trial A"),
+            node("case-a", "case_report", 6, "Case A"),
+        ],
+        "edges": [
+            {"source": "trial-a", "target": "guide-b", "relation": "updates"},
+            {"source": "review-b", "target": "guide-a", "relation": "supports"},
+            {"source": "case-a", "target": "review-a", "relation": "cautions"},
+            {"source": "review-a", "target": "review-c", "relation": "confirms"},
+        ],
+    }
+    service = FakeWorkbenchService(query_overrides={"graph": graph})
+    with running_server(service) as base_url, sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.goto(base_url)
+        page.get_by_text("35,408").wait_for()
+        page.get_by_role("button", name="开始循证分析").click()
+        page.get_by_text("推荐优先采用低剂量方案").wait_for()
+
+        collisions = page.locator("#evidence-graph").evaluate(
+            """svg => {
+              const nodes = [...svg.querySelectorAll('.graph-node')].map(group => ({
+                id: group.dataset.nodeId,
+                rect: group.querySelector('rect').getBBox(),
+              }));
+              const collisions = [];
+              for (const path of svg.querySelectorAll('.graph-edge')) {
+                const length = path.getTotalLength();
+                for (let distance = 0; distance <= length; distance += 3) {
+                  const point = path.getPointAtLength(distance);
+                  const hit = nodes.find(node => {
+                    if (node.id === path.dataset.source || node.id === path.dataset.target) return false;
+                    const rect = node.rect;
+                    return point.x >= rect.x && point.x <= rect.x + rect.width
+                      && point.y >= rect.y && point.y <= rect.y + rect.height;
+                  });
+                  if (hit) {
+                    collisions.push([path.dataset.source, path.dataset.target, hit.id]);
+                    break;
+                  }
+                }
+              }
+              return collisions;
+            }"""
+        )
+
+        assert collisions == []
+        browser.close()
+
+
 @pytest.mark.parametrize(
     ("model_error", "expected_guidance"),
     [

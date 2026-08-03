@@ -371,9 +371,13 @@ class ProductionQueryPipeline:
             graph=graph,
             claims=validated.claims,
         )
-        report = reporter.generate_with_fallback(question, bundle)
+        report = reporter.generate_grounded_claim_report(
+            question,
+            bundle,
+            model_used=claim_error is None,
+            model_error=claim_error,
+        )
         relation_counts = Counter(edge["relation"] for edge in graph["edges"])
-        model_error = report.model_error or claim_error
         return {
             "question": question,
             "mode": retrieval.mode,
@@ -381,9 +385,9 @@ class ProductionQueryPipeline:
             "filters": _filters_dict(filters),
             "reasoning_steps": list(report.analysis_steps),
             "answer_markdown": report.final_answer_markdown,
-            "model_used": report.model_used and claim_error is None,
+            "model_used": report.model_used,
             "model_name": report.model_name,
-            "model_error": model_error,
+            "model_error": report.model_error,
             "summary": {
                 "evidence_count": len(sources),
                 "relation_count": len(graph["edges"]),

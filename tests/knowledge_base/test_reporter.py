@@ -325,6 +325,25 @@ def test_reporter_fallback_preserves_inventory_and_graph() -> None:
     )
 
 
+def test_grounded_claim_report_is_deterministic_without_second_model_call() -> None:
+    chat = FakeChatClient(valid_report_response())
+    bundle = evidence_bundle()
+
+    report = GroundedReporter(chat).generate_grounded_claim_report(
+        "question",
+        bundle,
+        model_used=True,
+        model_error=None,
+    )
+
+    assert chat.calls == []
+    assert report.model_used is True
+    assert report.model_error is None
+    assert len(report.analysis_steps) == 6
+    assert report.final_answer_markdown.startswith("## 综合回答")
+    assert "### 证据链" in report.final_answer_markdown
+
+
 def test_claim_extractor_discards_unknown_chunks_and_keeps_audit_record() -> None:
     response = {
         "claims": [
