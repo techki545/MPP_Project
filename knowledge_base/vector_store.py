@@ -98,6 +98,36 @@ class LocalVectorStore:
     ) -> None:
         self._upsert(self.FULLTEXT_COLLECTION, items)
 
+    def prune_fulltext(self, record_ids: Sequence[object]) -> int:
+        """Remove vectors whose source chunks no longer exist in SQLite."""
+
+        expected = {str(record_id) for record_id in record_ids}
+        stale_point_ids: list[Any] = []
+        offset: Any | None = None
+        while True:
+            points, offset = self._client.scroll(
+                collection_name=self.FULLTEXT_COLLECTION,
+                limit=512,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in points:
+                record_id = str((point.payload or {}).get("record_id", ""))
+                if record_id not in expected:
+                    stale_point_ids.append(point.id)
+            if offset is None:
+                break
+        for start in range(0, len(stale_point_ids), 512):
+            self._client.delete(
+                collection_name=self.FULLTEXT_COLLECTION,
+                points_selector=qmodels.PointIdsList(
+                    points=stale_point_ids[start : start + 512]
+                ),
+                wait=True,
+            )
+        return len(stale_point_ids)
+
     def query_metadata(
         self,
         vector: Sequence[float],

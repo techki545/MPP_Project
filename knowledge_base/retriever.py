@@ -43,6 +43,18 @@ _POPULATION_TERMS = (
     "婴幼儿",
     "青少年",
 )
+_CONDITION_TERMS = (
+    "smpp",
+    "rmpp",
+    "mpp",
+    "mycoplasma pneumoniae pneumonia",
+    "mycoplasma pneumonia",
+    "severe mycoplasma pneumonia",
+    "重症支原体肺炎",
+    "难治性支原体肺炎",
+    "肺炎支原体肺炎",
+    "支原体肺炎",
+)
 _ADULT_POPULATION_TERMS = (
     "adult",
     "adults",
@@ -63,6 +75,19 @@ _INTERVENTION_TERMS = (
     "糖皮质激素",
     "甲泼尼龙",
     "阿奇霉素",
+    "大环内酯",
+    "克拉霉素",
+    "多西环素",
+    "米诺环素",
+    "左氧氟沙星",
+    "免疫球蛋白",
+    "丙种球蛋白",
+    "ivig",
+    "支气管镜",
+    "肺泡灌洗",
+    "抗凝",
+    "溶栓",
+    "运动",
 )
 _COMPARATOR_TERMS = (
     "pulse dose",
@@ -89,6 +114,9 @@ _OUTCOME_TERMS = (
     "不良反应",
     "高血压",
     "高血糖",
+    "疗程",
+    "治疗周期",
+    "住院时间",
 )
 _SAFETY_TERMS = (
     "safety",
@@ -106,12 +134,126 @@ _SAFETY_TERMS = (
     "出血",
     "感染",
 )
+_QUESTION_TYPE_TERMS = (
+    ("diagnosis", ("诊断", "鉴别", "识别", "预测", "检查", "diagnos", "detect")),
+    ("prognosis", ("预后", "随访", "长期结局", "复发", "prognos", "follow-up")),
+    ("etiology", ("病因", "危险因素", "为什么", "etiolog", "risk factor")),
+    ("prevention", ("预防", "疫苗", "prevent", "prophyl")),
+    ("safety", ("安全吗", "不良反应", "副作用", "风险是什么", "safety", "adverse")),
+    (
+        "treatment",
+        (
+            "治疗",
+            "用药",
+            "吃什么药",
+            "用什么药",
+            "用哪些药",
+            "哪些药",
+            "是否应",
+            "能否",
+            "剂量",
+            "疗程",
+            "何时使用",
+            "怎么处理",
+            "调整治疗",
+            "可考虑",
+            "何时需要",
+            "获益",
+            "treat",
+            "therapy",
+            "dose",
+        ),
+    ),
+)
+_RETRIEVAL_FOCUS_RULES = (
+    (
+        (
+            ("糖皮质激素", "甲泼尼龙", "steroid", "corticosteroid", "methylprednisolone"),
+            ("何时", "时间", "开始", "时机", "早期", "early", "timing"),
+        ),
+        "早期 糖皮质激素 治疗时机 early corticosteroid therapy timing",
+    ),
+    (
+        (
+            ("大环内酯", "macrolide"),
+            ("耐药", "resistan"),
+        ),
+        "大环内酯 耐药 macrolide resistant resistance",
+    ),
+    (
+        (("四环素", "多西环素", "米诺环素", "tetracycline", "doxycycline", "minocycline"),),
+        "多西环素 米诺环素 doxycycline minocycline tetracycline tosufloxacin",
+    ),
+    (
+        (("血栓", "肺栓塞", "抗凝", "溶栓", "thrombo", "embol", "anticoag"),),
+        "肺栓塞 血栓 溶栓 抗凝 pulmonary embolism thrombosis anticoagulation",
+    ),
+    (
+        (
+            ("难治性", "rmpp", "refractory"),
+            ("诊断", "识别", "预测", "diagnos", "predict"),
+        ),
+        "难治性 早期诊断 预测 refractory early diagnosis prediction",
+    ),
+    (
+        (
+            ("重症", "smpp", "severe"),
+            ("标准", "识别", "危险因素", "criteria", "diagnos", "risk factor"),
+        ),
+        "重症 诊断标准 危险因素 severe diagnostic criteria risk factors",
+    ),
+    (
+        (
+            ("闭塞性细支气管炎", "支气管扩张", "bronchiolitis obliterans", "bronchiectasis"),
+            ("随访", "长期", "结局", "危险因素", "follow-up", "outcome", "risk factor"),
+        ),
+        "闭塞性细支气管炎 支气管扩张 危险因素 bronchiolitis obliterans bronchiectasis risk factors",
+    ),
+)
 _LOWER_LEVEL_EVIDENCE = {
     "observational_study",
     "narrative_review",
     "case_report",
     "unknown",
 }
+
+_QUESTION_TOPIC_GROUPS = (
+    ("steroid", ("糖皮质激素", "甲泼尼龙", "甲强龙", "地塞米松", "steroid", "corticosteroid", "methylprednisolone")),
+    ("exercise", ("运动", "锻炼", "康复训练", "体力活动", "exercise", "physical activity")),
+    ("macrolide", ("大环内酯", "阿奇霉素", "红霉素", "克拉霉素", "macrolide", "azithromycin")),
+    ("tetracycline", ("四环素", "多西环素", "米诺环素", "tetracycline", "doxycycline", "minocycline")),
+    ("bronchoscopy", ("支气管镜", "肺泡灌洗", "bronchoscopy", "bronchoalveolar lavage")),
+    ("ivig", ("免疫球蛋白", "丙种球蛋白", "ivig", "immunoglobulin")),
+    ("thrombosis", ("血栓", "肺栓塞", "抗凝", "溶栓", "thrombo", "embol", "anticoag")),
+    ("timing", ("何时", "时机", "早期", "病程", "timing", "when", "early")),
+    ("dose", ("剂量", "用量", "疗程", "mg/kg", "dose")),
+    ("diagnosis", ("诊断", "识别", "预测", "标准", "危险因素", "diagnos", "predict", "risk factor")),
+    ("long_term", ("长期", "随访", "闭塞性细支气管炎", "支气管扩张", "long-term", "follow-up", "bronchiolitis obliterans", "bronchiectasis")),
+)
+
+_SMPP_TERMS = (
+    "smpp",
+    "severe mycoplasma pneumoniae pneumonia",
+    "severe mycoplasma pneumonia",
+    "重症肺炎支原体肺炎",
+    "重症支原体肺炎",
+    "重症mpp",
+)
+_RMPP_TERMS = (
+    "rmpp",
+    "refractory mycoplasma pneumoniae pneumonia",
+    "refractory mycoplasma pneumonia",
+    "难治性肺炎支原体肺炎",
+    "难治性支原体肺炎",
+    "难治性mpp",
+)
+_MPP_TERMS = (
+    "mpp",
+    "mycoplasma pneumoniae pneumonia",
+    "mycoplasma pneumonia",
+    "肺炎支原体肺炎",
+    "支原体肺炎",
+)
 
 
 @dataclass(frozen=True)
@@ -127,6 +269,9 @@ class QueryContext:
     year_to: int | None
     evidence_types: tuple[str, ...]
     fulltext_only: bool
+    condition_terms: tuple[str, ...] = ()
+    question_type: str = "general"
+    retrieval_queries: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -141,6 +286,16 @@ class QueryContext:
             "year_to": self.year_to,
             "evidence_types": list(self.evidence_types),
             "fulltext_only": self.fulltext_only,
+            "condition_terms": list(self.condition_terms),
+            "question_type": self.question_type,
+            "pico": {
+                "population": list(dict.fromkeys((*self.population_terms, *self.condition_terms))),
+                "intervention": list(self.intervention_terms),
+                "comparator": list(self.comparator_terms),
+                "outcome": list(self.outcome_terms),
+            },
+            "retrieval_queries": list(self.retrieval_queries),
+            "subquestions": list(self.retrieval_queries[1:]),
         }
 
 
@@ -218,6 +373,7 @@ class HybridRetriever:
         active_filters = filters or SearchFilters()
         self._validate_filters(active_filters)
         context = build_query_context(question, active_filters)
+        retrieval_queries = context.retrieval_queries or (context.raw_question,)
 
         lists: list[list[RankedHit]] = []
         vector_available = False
@@ -227,22 +383,47 @@ class HybridRetriever:
         embedding_failure = False
 
         try:
-            embedded = self.embedding_client.embed([context.raw_question])
-            if len(embedded) != 1 or not embedded[0]:
+            embed_queries = getattr(self.embedding_client, "embed_queries", None)
+            embedded = (
+                embed_queries(list(retrieval_queries))
+                if callable(embed_queries)
+                else self.embedding_client.embed(list(retrieval_queries))
+            )
+            if len(embedded) != len(retrieval_queries) or not all(embedded):
                 raise ValueError("query embedding response is invalid")
             query_filter = build_vector_filter(active_filters)
-            vector_lists, vector_failure = self._vector_lists(
-                embedded[0], query_filter
-            )
-            vector_available = bool(vector_lists)
-            lists.extend(vector_lists)
+            vector_failures: list[bool] = []
+            for query_index, vector in enumerate(embedded):
+                vector_lists, failed = self._vector_lists(
+                    vector,
+                    query_filter,
+                    query_index=query_index,
+                )
+                vector_failures.append(failed)
+                lists.extend(vector_lists)
+            vector_available = any("vector_" in item.source for group in lists for item in group)
+            vector_failure = any(vector_failures)
         except Exception:
             embedding_failure = True
 
-        lexical_lists, lexical_failure, lexical_available = self._lexical_lists(
-            context.normalized_fts_query, active_filters
-        )
-        lists.extend(lexical_lists)
+        lexical_failures: list[bool] = []
+        lexical_successes: list[bool] = []
+        for query_index, retrieval_query in enumerate(retrieval_queries):
+            normalized_fts_query = " ".join(
+                _TOKEN_PATTERN.findall(
+                    unicodedata.normalize("NFKC", retrieval_query).casefold()
+                )
+            )
+            lexical_lists, failed, available = self._lexical_lists(
+                normalized_fts_query,
+                active_filters,
+                query_index=query_index,
+            )
+            lists.extend(lexical_lists)
+            lexical_failures.append(failed)
+            lexical_successes.append(available)
+        lexical_failure = any(lexical_failures)
+        lexical_available = any(lexical_successes)
 
         if not vector_available and not lexical_available:
             raise KnowledgeBaseError(
@@ -268,7 +449,7 @@ class HybridRetriever:
                 degraded_reason = ""
 
         candidates = self._fuse(lists, active_filters, context)
-        ranked = self._rerank(candidates)
+        ranked = self._rerank(candidates, context)
         selected = self._select_evidence_package(ranked, context)
         return RetrievalResult(
             mode=mode,
@@ -279,7 +460,11 @@ class HybridRetriever:
         )
 
     def _vector_lists(
-        self, vector: Sequence[float], query_filter: qmodels.Filter | None
+        self,
+        vector: Sequence[float],
+        query_filter: qmodels.Filter | None,
+        *,
+        query_index: int = 0,
     ) -> tuple[list[list[RankedHit]], bool]:
         results: list[list[RankedHit]] = []
         failures = 0
@@ -290,13 +475,18 @@ class HybridRetriever:
             try:
                 method = getattr(self.vector_store, method_name)
                 hits = method(vector, limit=limit, query_filter=query_filter)
-                results.append(_relabel_hits(hits, source, limit))
+                source_name = source if query_index == 0 else f"{source}_focus_{query_index}"
+                results.append(_relabel_hits(hits, source_name, limit))
             except Exception:
                 failures += 1
         return results, failures > 0
 
     def _lexical_lists(
-        self, query: str, filters: SearchFilters
+        self,
+        query: str,
+        filters: SearchFilters,
+        *,
+        query_index: int = 0,
     ) -> tuple[list[list[RankedHit]], bool, bool]:
         results: list[list[RankedHit]] = []
         successes = 0
@@ -308,7 +498,8 @@ class HybridRetriever:
             try:
                 method = getattr(self.lexical_store, method_name)
                 hits = method(query, limit, filters)
-                results.append(_relabel_hits(hits, source, limit))
+                source_name = source if query_index == 0 else f"{source}_focus_{query_index}"
+                results.append(_relabel_hits(hits, source_name, limit))
                 successes += 1
             except Exception:
                 failures += 1
@@ -353,7 +544,9 @@ class HybridRetriever:
         candidates.sort(key=lambda item: (-item.fused_score, item.document_id))
         return candidates[: self.CANDIDATE_LIMIT]
 
-    def _rerank(self, candidates: list[_Candidate]) -> list[RetrievedDocument]:
+    def _rerank(
+        self, candidates: list[_Candidate], context: QueryContext
+    ) -> list[RetrievedDocument]:
         if not candidates:
             return []
         max_fused = max(item.fused_score for item in candidates)
@@ -366,6 +559,13 @@ class HybridRetriever:
             source_completeness = (
                 1.0 if _has_fulltext_hit(item.supporting_hits) else 0.4
             )
+            applicability, applicability_score = _evidence_applicability(
+                item.payload, item.supporting_hits, context
+            )
+            question_relevance = _question_relevance(
+                item.payload, item.supporting_hits, context
+            )
+            semantic_similarity = _semantic_similarity(item.supporting_hits)
             final_score = (
                 0.65 * relevance_score
                 + 0.15 * EVIDENCE_LEVEL_SCORE.get(evidence_type, 0.10)
@@ -373,6 +573,10 @@ class HybridRetriever:
                 + 0.05 * recency[item.document_id]
                 + 0.05 * source_completeness
             )
+            if _target_condition_scope(context) != "unspecified":
+                final_score += 0.10 * (applicability_score - 0.5)
+                final_score += 0.08 * (question_relevance - 0.5)
+                final_score += 0.08 * (semantic_similarity - 0.5)
             payload = dict(item.payload)
             payload.update(
                 {
@@ -381,6 +585,10 @@ class HybridRetriever:
                     "relevance_score": relevance_score,
                     "recency_score": recency[item.document_id],
                     "source_completeness_score": source_completeness,
+                    "population_applicability": applicability,
+                    "population_applicability_score": applicability_score,
+                    "question_relevance_score": question_relevance,
+                    "semantic_similarity_score": semantic_similarity,
                 }
             )
             ranked.append(
@@ -423,6 +631,32 @@ class HybridRetriever:
             )
             if match is not None:
                 required.append(match)
+
+        for query_index in range(1, len(context.retrieval_queries)):
+            focus_suffix = f"_focus_{query_index}"
+            for source_prefix, retain_count in (
+                ("fts_metadata", 2),
+                ("vector_metadata", 1),
+            ):
+                source_name = f"{source_prefix}{focus_suffix}"
+                focus_candidates = [
+                    item
+                    for item in ranked
+                    if any(hit.source == source_name for hit in item.supporting_hits)
+                ]
+                ordered_focus = sorted(
+                    focus_candidates,
+                    key=lambda item: (
+                        min(
+                            hit.rank
+                            for hit in item.supporting_hits
+                            if hit.source == source_name
+                        ),
+                        -item.final_score,
+                        item.document_id,
+                    ),
+                )
+                required.extend(ordered_focus[:retain_count])
 
         safety = next(
             (
@@ -476,19 +710,133 @@ def build_query_context(
     padded = f" {normalized} "
     tokens = _TOKEN_PATTERN.findall(normalized)
     active_filters = filters or SearchFilters()
+    population_terms = _detect_terms(padded, _POPULATION_TERMS)
+    condition_terms = _detect_terms(padded, _CONDITION_TERMS)
+    intervention_terms = _detect_terms(padded, _INTERVENTION_TERMS)
+    comparator_terms = _detect_terms(padded, _COMPARATOR_TERMS)
+    outcome_terms = _detect_terms(padded, _OUTCOME_TERMS)
+    question_type = _detect_question_type(padded)
+    retrieval_queries = _build_retrieval_queries(
+        raw_question,
+        question_type=question_type,
+        population_terms=population_terms,
+        condition_terms=condition_terms,
+        intervention_terms=intervention_terms,
+    )
     return QueryContext(
         raw_question=raw_question,
         normalized_fts_query=" ".join(tokens),
-        population_terms=_detect_terms(padded, _POPULATION_TERMS),
-        intervention_terms=_detect_terms(padded, _INTERVENTION_TERMS),
-        comparator_terms=_detect_terms(padded, _COMPARATOR_TERMS),
-        outcome_terms=_detect_terms(padded, _OUTCOME_TERMS),
+        population_terms=population_terms,
+        intervention_terms=intervention_terms,
+        comparator_terms=comparator_terms,
+        outcome_terms=outcome_terms,
         safety_focused=any(term in padded for term in _SAFETY_TERMS),
         year_from=active_filters.year_from,
         year_to=active_filters.year_to,
         evidence_types=tuple(sorted(active_filters.evidence_types)),
         fulltext_only=active_filters.fulltext_only,
+        condition_terms=condition_terms,
+        question_type=question_type,
+        retrieval_queries=retrieval_queries,
     )
+
+
+def _detect_question_type(text: str) -> str:
+    matched = {
+        question_type
+        for question_type, terms in _QUESTION_TYPE_TERMS
+        if any(term in text for term in terms)
+    }
+    if "safety" in matched and any(
+        term in text for term in ("安全吗", "不良反应", "副作用", "safety", "adverse event")
+    ):
+        return "safety"
+    if "treatment" in matched and any(
+        term in text
+        for term in (
+            "治疗",
+            "用药",
+            "吃什么药",
+            "用什么药",
+            "用哪些药",
+            "哪些药",
+            "是否应",
+            "能否",
+            "剂量",
+            "疗程",
+            "何时使用",
+            "怎么处理",
+            "可考虑",
+            "何时需要",
+            "获益",
+            "treat",
+            "therapy",
+            "dose",
+        )
+    ):
+        return "treatment"
+    for question_type, terms in _QUESTION_TYPE_TERMS:
+        if question_type in matched:
+            return question_type
+    return "general"
+
+
+def _build_retrieval_queries(
+    raw_question: str,
+    *,
+    question_type: str,
+    population_terms: tuple[str, ...],
+    condition_terms: tuple[str, ...],
+    intervention_terms: tuple[str, ...],
+) -> tuple[str, ...]:
+    queries = [raw_question]
+    normalized = unicodedata.normalize("NFKC", raw_question).casefold()
+    condition = condition_terms[0] if condition_terms else "肺炎支原体肺炎"
+    population = population_terms[0] if population_terms else "儿童"
+    for term_groups, focus_query in _RETRIEVAL_FOCUS_RULES:
+        if all(any(term in normalized for term in group) for group in term_groups):
+            queries.append(f"{condition} {population} {focus_query}")
+    duration_focused = bool(
+        re.search(
+            r"疗程|治疗周期|治疗多久|多长时间|需要多久|持续多久|course of treatment|treatment duration",
+            normalized,
+            re.I,
+        )
+    )
+    if (
+        question_type == "treatment"
+        and duration_focused
+        and not intervention_terms
+        and condition_terms
+    ):
+        queries.extend(
+            (
+                f"{condition} {population} 抗菌药物 阿奇霉素 疗程 治疗周期 指南",
+                f"{condition} {population} 糖皮质激素 甲泼尼龙 疗程 减量 治疗周期",
+            )
+        )
+    elif question_type == "treatment" and not intervention_terms and condition_terms:
+        queries.extend(
+            (
+                f"{condition} {population} 抗菌药物 一线治疗 指南",
+                f"{condition} {population} 糖皮质激素 免疫治疗",
+            )
+        )
+    elif len(queries) == 1 and condition_terms:
+        intervention = intervention_terms[0] if intervention_terms else ""
+        focus_queries = {
+            "diagnosis": f"{condition} {population} 诊断标准 临床指标 病原学检测 鉴别诊断",
+            "prognosis": f"{condition} {population} 预后 危险因素 长期结局 随访",
+            "etiology": f"{condition} {population} 重症 危险因素 相关因素 发病机制",
+            "prevention": f"{condition} {population} 预防 早期干预 风险降低",
+            "safety": (
+                f"{condition} {population} {intervention} 不良反应 安全性 QT间期 禁忌"
+            ),
+        }
+        focus_query = focus_queries.get(question_type)
+        if focus_query:
+            queries.append(focus_query)
+    return tuple(dict.fromkeys(queries))[:3]
 
 
 def build_vector_filter(filters: SearchFilters) -> qmodels.Filter | None:
@@ -660,3 +1008,139 @@ def _has_fulltext_hit(hits: Iterable[RankedHit]) -> bool:
 def _is_safety_focused(item: RetrievedDocument) -> bool:
     text = " ".join(hit.text for hit in item.supporting_hits).casefold()
     return any(term in text for term in _SAFETY_TERMS)
+
+
+def _target_condition_scope(context: QueryContext) -> str:
+    text = unicodedata.normalize("NFKC", context.raw_question).casefold()
+    if any(term in text for term in _SMPP_TERMS):
+        return "smpp"
+    if any(term in text for term in _RMPP_TERMS):
+        return "rmpp"
+    if any(term in text for term in _MPP_TERMS):
+        return "mpp"
+    return "unspecified"
+
+
+def _candidate_text(
+    payload: dict[str, Any], hits: Iterable[RankedHit]
+) -> str:
+    values = [
+        str(payload.get("title", "")),
+        str(payload.get("abstract", "")),
+        str(payload.get("population", "")),
+    ]
+    for hit in hits:
+        values.extend(
+            (
+                hit.text,
+                str(hit.payload.get("title", "")),
+                str(hit.payload.get("abstract", "")),
+                str(hit.payload.get("population", "")),
+            )
+        )
+    return unicodedata.normalize("NFKC", " ".join(values)).casefold()
+
+
+def _evidence_applicability(
+    payload: dict[str, Any],
+    hits: Iterable[RankedHit],
+    context: QueryContext,
+) -> tuple[str, float]:
+    """Label whether a paper directly studies the condition asked about."""
+
+    scope = _target_condition_scope(context)
+    if scope == "unspecified":
+        return "not_assessed", 0.5
+    hit_list = tuple(hits)
+    title = unicodedata.normalize(
+        "NFKC",
+        " ".join(
+            value
+            for value in (
+                str(payload.get("title", "")),
+                *(str(hit.payload.get("title", "")) for hit in hit_list),
+            )
+            if value
+        ),
+    ).casefold()
+    metadata = unicodedata.normalize(
+        "NFKC",
+        " ".join(
+            value
+            for value in (
+                str(payload.get("abstract", "")),
+                str(payload.get("population", "")),
+                *(str(hit.payload.get("abstract", "")) for hit in hit_list),
+                *(str(hit.payload.get("population", "")) for hit in hit_list),
+            )
+            if value
+        ),
+    ).casefold()
+    text = title or metadata or _candidate_text(payload, hit_list)
+
+    def signals(value: str) -> tuple[bool, bool, bool]:
+        return (
+            any(term in value for term in _SMPP_TERMS),
+            any(term in value for term in _RMPP_TERMS),
+            any(term in value for term in _MPP_TERMS),
+        )
+
+    has_smpp, has_rmpp, has_mpp = signals(title)
+    if not (has_smpp or has_rmpp or has_mpp):
+        has_smpp, has_rmpp, has_mpp = signals(metadata)
+    if not (has_smpp or has_rmpp or has_mpp):
+        has_smpp, has_rmpp, has_mpp = signals(text)
+    if scope == "smpp":
+        if has_smpp:
+            return "direct", 1.0
+        if has_rmpp:
+            return "indirect_rmpp", 0.65
+        if has_mpp:
+            return "general_mpp", 0.45
+    elif scope == "rmpp":
+        if has_rmpp:
+            return "direct", 1.0
+        if has_smpp:
+            return "indirect_smpp", 0.65
+        if has_mpp:
+            return "general_mpp", 0.45
+    elif scope == "mpp" and has_mpp:
+        return "direct", 1.0
+    return "unclear", 0.2
+
+
+def _question_relevance(
+    payload: dict[str, Any],
+    hits: Iterable[RankedHit],
+    context: QueryContext,
+) -> float:
+    """Return a small, explainable local reranking signal for clinical focus."""
+
+    question = unicodedata.normalize("NFKC", context.raw_question).casefold()
+    text = _candidate_text(payload, hits)
+    requested_groups = [
+        terms
+        for _, terms in _QUESTION_TOPIC_GROUPS
+        if any(term in question for term in terms)
+    ]
+    if not requested_groups:
+        return 0.5
+    matched = sum(
+        1 for terms in requested_groups if any(term in text for term in terms)
+    )
+    return matched / len(requested_groups)
+
+
+def _semantic_similarity(hits: Iterable[RankedHit]) -> float:
+    """Reuse local E5 vector similarity as a post-fusion semantic reranker."""
+
+    scores = [
+        float(hit.score)
+        for hit in hits
+        if hit.source.startswith("vector_")
+        and isinstance(hit.score, (int, float))
+        and not isinstance(hit.score, bool)
+    ]
+    if not scores:
+        return 0.5
+    return max(0.0, min(1.0, max(scores)))

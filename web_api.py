@@ -167,7 +167,13 @@ class GraphRAGWebService:
     def job_status(self, job_id: str) -> dict[str, Any]:
         if self.job_manager is None:
             raise APIError("job_not_found", "构建任务不存在。", status=404)
-        return self._call_knowledge(self.job_manager.get, job_id).as_dict()
+        result = self._call_knowledge(self.job_manager.get, job_id).as_dict()
+        if result.get("state") in {"queued", "running", "pausing"}:
+            status = self.knowledge_base_status()
+            live_progress = status.get("build_progress")
+            if isinstance(live_progress, Mapping):
+                result["progress"] = {**result.get("progress", {}), **live_progress}
+        return result
 
     def start_build(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self.job_manager is None:

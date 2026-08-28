@@ -58,7 +58,12 @@ def _create_default_service() -> GraphRAGWebService:
     store = SQLiteStore(settings.sqlite_path)
     store.initialize()
     knowledge_service = create_production_service(settings, store)
-    runner = ProductionBuildRunner(settings, store)
+    runner = ProductionBuildRunner(
+        settings,
+        store,
+        embedding_client=knowledge_service.pipeline.retriever.embedding_client,
+        vector_store=knowledge_service.pipeline.retriever.vector_store,
+    )
     jobs = KnowledgeBaseJobManager(
         indexer=runner,
         store_path=settings.data_dir / "jobs.sqlite3",

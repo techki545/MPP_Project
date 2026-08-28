@@ -51,6 +51,12 @@ class FakeEmbeddingClient:
         return [[1.0, 0.0, 0.0] for _ in texts]
 
 
+class FakeE5EmbeddingClient(FakeEmbeddingClient):
+    def embed_queries(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append([f"query::{text}" for text in texts])
+        return [[1.0, 0.0, 0.0] for _ in texts]
+
+
 class FakeVectorStore:
     def __init__(
         self,
@@ -124,6 +130,19 @@ def test_hybrid_retrieval_uses_four_lists_and_deduplicates_documents() -> None:
     }
 
 
+def test_hybrid_retrieval_prefers_query_specific_embedding_method() -> None:
+    embedder = FakeE5EmbeddingClient()
+    evidence = hit("doc-a", "doc-a", "metadata", 1)
+
+    HybridRetriever(
+        embedder,
+        FakeVectorStore(metadata=[evidence]),
+        FakeLexicalStore(metadata=[evidence]),
+    ).search("clinical question", SearchFilters())
+
+    assert embedder.calls == [["query::clinical question"]]
+
+
 def test_embedding_failure_returns_explicit_keyword_mode() -> None:
     embedder = FakeEmbeddingClient(fail=True)
     lexical = FakeLexicalStore(
@@ -161,6 +180,123 @@ def test_query_context_detects_known_pico_terms_and_preserves_unknown_terms() ->
     assert "pulse dose" in context.comparator_terms
     assert "fever" in context.outcome_terms
     assert "smpp" in context.normalized_fts_query
+
+
+def test_broad_chinese_treatment_question_is_typed_and_decomposed() -> None:
+    context = build_query_context("重症支原体肺炎儿童要吃什么药？")
+
+    assert context.question_type == "treatment"
+    assert "重症支原体肺炎" in context.condition_terms
+    assert "儿童" in context.population_terms
+    assert len(context.retrieval_queries) == 3
+    assert "抗菌药物" in context.retrieval_queries[1]
+    assert "糖皮质激素" in context.retrieval_queries[2]
+    assert context.as_dict()["pico"]["population"]
+
+
+def test_broad_duration_question_decomposes_component_specific_courses() -> None:
+    context = build_query_context("重症支原体肺炎儿童治疗周期是多长时间？")
+
+    assert context.question_type == "treatment"
+    assert len(context.retrieval_queries) == 3
+    assert "阿奇霉素" in context.retrieval_queries[1]
+    assert "疗程" in context.retrieval_queries[1]
+    assert "甲泼尼龙" in context.retrieval_queries[2]
+    assert "疗程" in context.retrieval_queries[2]
+
+
+def test_broad_medication_wording_is_typed_and_decomposed() -> None:
+    context = build_query_context("重症支原体肺炎儿童要用哪些药？")
+
+    assert context.question_type == "treatment"
+    assert "抗菌药物" in context.retrieval_queries[1]
+    assert "糖皮质激素" in context.retrieval_queries[2]
+
+
+@pytest.mark.parametrize(
+    ("question", "question_type", "expected_focus"),
+    [
+        ("如何诊断儿童重症支原体肺炎？", "diagnosis", "诊断标准"),
+        ("儿童支原体肺炎为什么会发展成重症？", "etiology", "危险因素"),
+        ("阿奇霉素治疗儿童SMPP有哪些不良反应？", "safety", "QT间期"),
+    ],
+)
+def test_general_clinical_intents_add_matching_focus_queries(
+    question: str, question_type: str, expected_focus: str
+) -> None:
+    context = build_query_context(question)
+
+    assert context.question_type == question_type
+    assert len(context.retrieval_queries) == 2
+    assert expected_focus in context.retrieval_queries[1]
+
+
+def test_broad_treatment_question_runs_decomposed_vector_queries() -> None:
+    embedder = FakeEmbeddingClient()
+    evidence = hit("doc-a", "doc-a", "metadata", 1)
+    vectors = FakeVectorStore(metadata=[evidence])
+    lexical = FakeLexicalStore(metadata=[evidence])
+
+    result = HybridRetriever(
+        embedder,
+        vectors,
+        lexical,
+    ).search("重症支原体肺炎儿童要吃什么药？", SearchFilters())
+
+    assert len(embedder.calls[0]) == 3
+    assert len(vectors.calls) == 6
+    assert len(lexical.calls) == 6
+    assert [item.document_id for item in result.documents] == ["doc-a"]
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_focus"),
+    [
+        ("儿童SMPP何时开始糖皮质激素治疗更合适？", "early corticosteroid"),
+        ("大环内酯耐药MPP应如何识别并调整治疗？", "macrolide resistant"),
+        ("何时可考虑多西环素或米诺环素？", "doxycycline minocycline"),
+        ("MPP合并肺栓塞时抗凝治疗如何决策？", "pulmonary embolism"),
+        ("儿童难治性MPP如何早期诊断？", "refractory early diagnosis"),
+        ("儿童SMPP达到重症标准的危险因素是什么？", "severe diagnostic criteria"),
+        ("SMPP后如何随访闭塞性细支气管炎？", "bronchiolitis obliterans"),
+    ],
+)
+def test_domain_focus_questions_add_concise_bilingual_queries(
+    question: str, expected_focus: str
+) -> None:
+    context = build_query_context(question)
+
+    assert len(context.retrieval_queries) == 2
+    assert expected_focus in context.retrieval_queries[1]
+
+
+def test_focused_query_runs_both_vector_and_lexical_retrieval() -> None:
+    embedder = FakeEmbeddingClient()
+    evidence = hit("doc-a", "doc-a", "metadata", 1)
+    vectors = FakeVectorStore(metadata=[evidence])
+    lexical = FakeLexicalStore(metadata=[evidence])
+
+    HybridRetriever(embedder, vectors, lexical).search(
+        "儿童SMPP何时开始糖皮质激素治疗更合适？", SearchFilters()
+    )
+
+    assert len(embedder.calls[0]) == 2
+    assert len(vectors.calls) == 4
+    assert len(lexical.calls) == 4
+    assert {call[0] for call in lexical.calls} == {"metadata", "fulltext"}
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "大环内酯耐药MPP应如何识别并调整治疗？",
+        "何时可考虑多西环素或米诺环素？",
+        "何时需要支气管镜肺泡灌洗？",
+        "何时可考虑左氧氟沙星，其获益和风险是什么？",
+    ],
+)
+def test_mixed_intent_treatment_questions_prioritize_the_decision(question: str) -> None:
+    assert build_query_context(question).question_type == "treatment"
 
 
 def test_invalid_year_range_is_rejected_before_any_search() -> None:
@@ -247,6 +383,66 @@ def test_reranking_uses_exact_weights_and_year_normalization() -> None:
     assert result.documents[0].document_id == "doc-new"
     assert result.documents[0].final_score == pytest.approx(expected_new)
     assert result.documents[1].final_score < result.documents[0].final_score
+
+
+def test_smpp_reranking_labels_direct_and_rmpp_extrapolated_evidence() -> None:
+    direct = hit("direct", "direct", "metadata", 2, text="重症支原体肺炎 糖皮质激素")
+    indirect = hit("indirect", "indirect", "metadata", 1, text="难治性支原体肺炎 糖皮质激素")
+    result = HybridRetriever(
+        FakeEmbeddingClient(),
+        FakeVectorStore(metadata=[indirect, direct]),
+        FakeLexicalStore(),
+    ).search("重症支原体肺炎儿童是否使用糖皮质激素？", SearchFilters())
+
+    by_id = {item.document_id: item for item in result.documents}
+    assert by_id["direct"].payload["population_applicability"] == "direct"
+    assert by_id["indirect"].payload["population_applicability"] == "indirect_rmpp"
+    assert by_id["direct"].payload["population_applicability_score"] == 1.0
+    assert by_id["direct"].final_score > by_id["indirect"].final_score
+
+
+def test_question_aware_reranking_penalizes_wrong_clinical_focus() -> None:
+    focused = hit("focused", "focused", "metadata", 2, text="重症支原体肺炎儿童运动与康复训练")
+    wrong_focus = hit("wrong", "wrong", "metadata", 1, text="重症支原体肺炎儿童糖皮质激素治疗")
+    result = HybridRetriever(
+        FakeEmbeddingClient(),
+        FakeVectorStore(metadata=[wrong_focus, focused]),
+        FakeLexicalStore(),
+    ).search("重症支原体肺炎儿童可以运动吗？", SearchFilters())
+
+    by_id = {item.document_id: item for item in result.documents}
+    assert by_id["focused"].payload["question_relevance_score"] == 1.0
+    assert by_id["wrong"].payload["question_relevance_score"] == 0.0
+    assert by_id["focused"].final_score > by_id["wrong"].final_score
+
+
+def test_local_vector_similarity_reranks_post_fusion_candidates() -> None:
+    stronger_semantics = hit(
+        "strong",
+        "strong",
+        "metadata",
+        2,
+        score=0.95,
+        text="重症支原体肺炎儿童糖皮质激素治疗",
+    )
+    weaker_semantics = hit(
+        "weak",
+        "weak",
+        "metadata",
+        1,
+        score=0.55,
+        text="重症支原体肺炎儿童糖皮质激素治疗",
+    )
+    result = HybridRetriever(
+        FakeEmbeddingClient(),
+        FakeVectorStore(metadata=[weaker_semantics, stronger_semantics]),
+        FakeLexicalStore(),
+    ).search("重症支原体肺炎儿童是否使用糖皮质激素？", SearchFilters())
+
+    by_id = {item.document_id: item for item in result.documents}
+    assert by_id["strong"].payload["semantic_similarity_score"] == 0.95
+    assert by_id["weak"].payload["semantic_similarity_score"] == 0.55
+    assert result.documents[0].document_id == "strong"
 
 
 def test_at_most_three_fulltext_chunks_are_retained_per_document() -> None:

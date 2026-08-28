@@ -5,215 +5,220 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <link rel="icon" href="data:,">
-  <title>SMPP 循证 Graph RAG 工作台</title>
+  <title>儿童 SMPP 循证 Graph RAG 工作台</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <header class="app-header">
-    <a class="brand" href="/" aria-label="SMPP EvidenceGraph 首页">
-      <span class="brand-mark" aria-hidden="true">EG</span>
-      <span>
-        <strong>SMPP EvidenceGraph</strong>
-        <small>儿科循证决策工作台</small>
-      </span>
-    </a>
-    <div class="header-statuses">
+  <header class="topbar">
+    <div class="brand-block">
+      <div class="brand-mark" aria-hidden="true">E</div>
+      <div>
+        <p class="product-name">EvidenceGraph</p>
+        <p class="product-context">儿童 SMPP 循证工作台</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="data-source-label" class="source-mode">正在识别数据源</span>
       <span id="kb-status" class="status-pill" data-state="loading">
         <i aria-hidden="true"></i><span>知识库加载中</span>
       </span>
       <span id="model-status" class="status-pill" data-state="loading">
         <i aria-hidden="true"></i><span>模型状态加载中</span>
       </span>
+      <button id="focus-settings" class="icon-button" type="button" title="模型设置" aria-label="打开模型设置">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm8.5 4a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.5 1a9 9 0 0 0-2-1.2L15.5 3h-4l-.4 2.6a9 9 0 0 0-2 1.2l-2.5-1-2 3.4 2 1.6A7 7 0 0 0 6.5 12c0 .4 0 .8.1 1.2l-2 1.6 2 3.4 2.5-1a9 9 0 0 0 2 1.2l.4 2.6h4l.4-2.6a9 9 0 0 0 2-1.2l2.5 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2Z"/></svg>
+      </button>
     </div>
   </header>
 
-  <main>
-    <section class="query-band" aria-labelledby="page-title">
-      <div class="query-inner">
-        <div class="query-heading">
-          <div>
-            <p class="eyebrow">CLINICAL EVIDENCE QUERY</p>
-            <h1 id="page-title">SMPP 循证 Graph RAG 工作台</h1>
-          </div>
-          <span id="data-source-label" class="source-mode">正在识别数据源</span>
-        </div>
-
-        <div class="question-row">
-          <div class="question-field">
-            <label for="clinical-question">临床问题</label>
-            <textarea id="clinical-question" rows="3" maxlength="2000" spellcheck="false"></textarea>
+  <main class="app-shell">
+    <section class="workbench evidence-workspace" aria-label="循证分析工作台">
+      <aside class="control-rail">
+        <div class="rail-section question-section question-row">
+          <div class="section-heading-row">
+            <label class="section-heading" for="clinical-question">临床问题</label>
             <span id="question-count" class="character-count">0 / 2000</span>
           </div>
-          <button id="run-query" class="primary-command" type="button">
-            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 4v16l13-8L7 4Zm2 3.5 7.2 4.5L9 16.5v-9Z"/></svg>
+          <textarea id="clinical-question" maxlength="2000" rows="6" spellcheck="false"></textarea>
+          <button id="run-query" class="primary-button" type="button">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 4v16l15-8L5 4Zm2 3.3 8.8 4.7L7 16.7V7.3Z"/></svg>
             <span>开始循证分析</span>
           </button>
+          <div id="query-status" class="analysis-progress" role="status" aria-live="polite">等待提交临床问题</div>
         </div>
 
-        <section id="model-service" class="model-service" aria-labelledby="model-service-title">
-          <h2 id="model-service-title">模型服务</h2>
-          <div class="model-service-fields">
-            <div class="model-control">
-              <label for="model-api-base">API 地址</label>
-              <input id="model-api-base" type="url" maxlength="2048" autocomplete="off" spellcheck="false">
-            </div>
-            <div class="model-control">
-              <label for="api-key">API Key</label>
-              <div class="api-key-field">
-                <input id="api-key" type="password" maxlength="4096" autocomplete="off" spellcheck="false">
-                <button id="toggle-api-key" class="model-icon-button" type="button" title="显示 API Key" aria-label="显示 API Key" aria-pressed="false">
-                  <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5c5.2 0 9.3 4.5 10 6.5v1C21.3 14.5 17.2 19 12 19S2.7 14.5 2 12.5v-1C2.7 9.5 6.8 5 12 5Zm0 2c-3.7 0-6.9 2.9-7.9 5 1 2.1 4.2 5 7.9 5s6.9-2.9 7.9-5c-1-2.1-4.2-5-7.9-5Zm0 2a3 3 0 1 1 0 6 3 3 0 0 1 0-6Zm0 2a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z"/></svg>
-                </button>
-              </div>
-            </div>
-            <div class="model-control">
-              <label for="chat-model-name">模型名</label>
-              <input id="chat-model-name" type="text" maxlength="256" autocomplete="off" spellcheck="false">
-            </div>
+        <div class="rail-section filter-section query-options">
+          <div class="section-heading-row">
+            <h2 class="section-heading">证据筛选</h2>
+            <button id="toggle-all-types" class="text-button" type="button">全不选</button>
           </div>
-        </section>
-
-        <div class="query-options">
-          <fieldset class="type-filter-group">
-            <legend>证据类型</legend>
-            <div id="evidence-filters" class="evidence-filters"></div>
-          </fieldset>
-          <div class="filter-fields">
-            <label>起始年份<input id="year-from" type="number" min="1900" max="2100" inputmode="numeric"></label>
-            <label>结束年份<input id="year-to" type="number" min="1900" max="2100" inputmode="numeric"></label>
-            <label class="checkbox-control"><input id="fulltext-only" type="checkbox"><span>仅使用全文</span></label>
+          <div id="evidence-filters" class="evidence-filters" aria-label="证据类型筛选"></div>
+          <div class="year-filters">
+            <label class="field-label" for="year-from">起始年份</label>
+            <input id="year-from" type="number" min="1900" max="2100" inputmode="numeric">
+            <label class="field-label" for="year-to">结束年份</label>
+            <input id="year-to" type="number" min="1900" max="2100" inputmode="numeric">
           </div>
+          <label class="checkbox-control"><input id="fulltext-only" type="checkbox"><span>仅使用全文</span></label>
         </div>
 
-        <div id="query-status" class="live-status" role="status" aria-live="polite">等待提交临床问题</div>
-      </div>
-    </section>
+        <details id="model-service" class="rail-section model-settings" open>
+          <summary class="section-heading">模型设置</summary>
+          <div class="settings-body">
+            <label class="field-label" for="model-api-base">API 地址</label>
+            <input id="model-api-base" type="url" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="https://api.deepseek.com">
 
-    <section class="kb-band" aria-labelledby="kb-title">
-      <div class="kb-inner">
-        <div class="kb-heading">
+            <label class="field-label" for="api-key">API Key</label>
+            <div class="secret-field">
+              <input id="api-key" type="password" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="sk-...">
+              <button id="toggle-api-key" class="field-icon-button" type="button" title="显示 API Key" aria-label="显示 API Key" aria-pressed="false">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5C6.5 5 2.2 8.4 1 12c1.2 3.6 5.5 7 11 7s9.8-3.4 11-7c-1.2-3.6-5.5-7-11-7Zm0 12c-3.8 0-7.2-2.1-8.7-5 1.5-2.9 4.9-5 8.7-5s7.2 2.1 8.7 5c-1.5 2.9-4.9 5-8.7 5Zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z"/></svg>
+              </button>
+            </div>
+
+            <label class="field-label" for="chat-model-name">模型名</label>
+            <input id="chat-model-name" type="text" maxlength="256" autocomplete="off" spellcheck="false" placeholder="deepseek-chat">
+            <p class="field-note">配置仅用于本次查询，刷新页面后自动清除。</p>
+          </div>
+        </details>
+
+        <details class="rail-section kb-console" open>
+          <summary class="section-heading">本地向量知识库</summary>
+          <div class="kb-body">
+            <dl class="corpus-metrics">
+              <div><dt>源题录</dt><dd id="stat-metadata">0</dd></div>
+              <div><dt>去重文献</dt><dd id="stat-unique">0</dd></div>
+              <div><dt>PDF</dt><dd id="stat-pdf">0</dd></div>
+              <div><dt>已匹配</dt><dd id="stat-matched">0</dd></div>
+              <div><dt>已解析</dt><dd id="stat-parsed">0</dd></div>
+              <div><dt>文本分块</dt><dd id="stat-chunks">0</dd></div>
+              <div><dt>已向量化</dt><dd id="stat-embedded">0</dd></div>
+            </dl>
+            <div class="kb-toolbar" aria-label="知识库构建控制">
+              <button id="build-kb" class="icon-button" type="button" title="构建本地索引" aria-label="构建知识库">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5c0-1.1 3.6-2 8-2s8 .9 8 2v14c0 1.1-3.6 2-8 2s-8-.9-8-2V5Zm2 0c.8.5 2.9 1 6 1s5.2-.5 6-1c-.8-.5-2.9-1-6-1s-5.2.5-6 1Zm12 3c-1.5.6-3.6 1-6 1s-4.5-.4-6-1v3c.8.5 2.9 1 6 1s5.2-.5 6-1V8Zm0 6c-1.5.6-3.6 1-6 1s-4.5-.4-6-1v3c.8.5 2.9 1 6 1s5.2-.5 6-1v-3Z"/></svg>
+              </button>
+              <button id="pause-kb" class="icon-button" type="button" title="在安全边界暂停" aria-label="暂停构建" disabled>
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 5h4v14H6V5Zm8 0h4v14h-4V5Z"/></svg>
+              </button>
+              <button id="continue-kb" class="icon-button" type="button" title="开始本地向量化" aria-label="开始本地向量化">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 5v14l11-7L7 5Z"/></svg>
+              </button>
+              <label class="retry-select-label" title="选择重试阶段">
+                <span class="sr-only">重试阶段</span>
+                <select id="retry-stage" aria-label="重试阶段">
+                  <option value="parse">PDF 解析</option>
+                  <option value="chunk">语义分块</option>
+                  <option value="embedding">向量嵌入</option>
+                  <option value="vector">向量写入</option>
+                </select>
+              </label>
+              <button id="retry-kb" class="icon-button" type="button" title="重试所选失败阶段" aria-label="重试失败阶段">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M18.4 7.6A8 8 0 1 0 20 14h-2a6 6 0 1 1-1-3.3L14 14h7V7l-2.6 2.6Z"/></svg>
+              </button>
+            </div>
+            <div class="job-progress" aria-live="polite">
+              <div><span id="job-stage">当前无构建任务</span><span id="job-state">空闲</span></div>
+              <progress id="job-progress" max="100"></progress>
+            </div>
+          </div>
+        </details>
+      </aside>
+
+      <section class="graph-workspace" aria-labelledby="graph-title">
+        <div class="workspace-header">
           <div>
-            <p class="eyebrow">LOCAL CORPUS</p>
-            <h2 id="kb-title">本地知识库</h2>
+            <p class="eyebrow">EVIDENCE GRAPH</p>
+            <h1 id="graph-title">证据关系图</h1>
+            <p id="graph-meta" class="workspace-meta">提交问题后生成本次查询图谱</p>
           </div>
-          <div class="kb-toolbar" aria-label="知识库构建控制">
-            <button id="build-kb" class="icon-button" type="button" title="构建本地索引" aria-label="构建知识库">
-              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5c0-1.1 3.6-2 8-2s8 .9 8 2v14c0 1.1-3.6 2-8 2s-8-.9-8-2V5Zm2 0c.8.5 2.9 1 6 1s5.2-.5 6-1c-.8-.5-2.9-1-6-1s-5.2.5-6 1Zm12 3c-1.5.6-3.6 1-6 1s-4.5-.4-6-1v3c.8.5 2.9 1 6 1s5.2-.5 6-1V8Zm0 6c-1.5.6-3.6 1-6 1s-4.5-.4-6-1v3c.8.5 2.9 1 6 1s5.2-.5 6-1v-3Z"/></svg>
-            </button>
-            <button id="pause-kb" class="icon-button" type="button" title="在安全边界暂停" aria-label="暂停构建" disabled>
-              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 5h4v14H6V5Zm8 0h4v14h-4V5Z"/></svg>
-            </button>
-            <button id="continue-kb" class="icon-button" type="button" title="继续构建并确认嵌入费用" aria-label="继续构建">
-              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 5v14l11-7L7 5Z"/></svg>
-            </button>
-            <label class="retry-select-label" title="选择重试阶段">
-              <span class="sr-only">重试阶段</span>
-              <select id="retry-stage" aria-label="重试阶段">
-                <option value="parse">PDF 解析</option>
-                <option value="chunk">语义分块</option>
-                <option value="embedding">向量嵌入</option>
-                <option value="vector">向量写入</option>
-              </select>
-            </label>
-            <button id="retry-kb" class="icon-button" type="button" title="重试所选失败阶段" aria-label="重试失败阶段">
-              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M18.4 7.6A8 8 0 1 0 20 14h-2a6 6 0 1 1-1-3.3L14 14h7V7l-2.6 2.6Z"/></svg>
-            </button>
+          <div class="relation-legend" aria-label="关系图例">
+            <span><i class="legend-line supports"></i>支持</span>
+            <span><i class="legend-line updates"></i>更新</span>
+            <span><i class="legend-line supplements"></i>补充</span>
+            <span><i class="legend-line confirms"></i>确认</span>
+            <span><i class="legend-line conflicts"></i>冲突</span>
+            <span><i class="legend-line cautions"></i>警示</span>
           </div>
         </div>
 
-        <dl class="corpus-metrics">
-          <div><dt>源题录</dt><dd id="stat-metadata">0</dd></div>
-          <div><dt>去重文献</dt><dd id="stat-unique">0</dd></div>
-          <div><dt>PDF</dt><dd id="stat-pdf">0</dd></div>
-          <div><dt>已匹配</dt><dd id="stat-matched">0</dd></div>
-          <div><dt>已解析</dt><dd id="stat-parsed">0</dd></div>
-          <div><dt>文本分块</dt><dd id="stat-chunks">0</dd></div>
-          <div><dt>已向量化</dt><dd id="stat-embedded">0</dd></div>
-        </dl>
-
-        <div class="job-progress" aria-live="polite">
-          <div class="progress-heading"><span id="job-stage">当前无构建任务</span><span id="job-state">空闲</span></div>
-          <progress id="job-progress" max="100"></progress>
-        </div>
-      </div>
-    </section>
-
-    <section id="report-workspace" class="report-workspace" aria-labelledby="report-title">
-      <div class="section-header">
-        <div>
-          <p class="eyebrow">AUDITABLE EVIDENCE REPORT</p>
-          <h2 id="report-title">循证报告</h2>
-        </div>
-        <div class="report-badges">
-          <span id="retrieval-mode" class="report-badge">尚未检索</span>
-          <span id="report-model" class="report-badge">尚未生成</span>
-        </div>
-      </div>
-
-      <div class="report-columns">
-        <section class="reasoning-panel" aria-labelledby="reasoning-title">
-          <h3 id="reasoning-title">第一部分：循证思考过程</h3>
-          <div id="reasoning-steps" class="reasoning-steps">
-            <p class="empty-state">提交问题后显示分层检索与证据合成过程。</p>
-          </div>
-        </section>
-        <section class="answer-panel" aria-labelledby="answer-title">
-          <div class="answer-heading">
-            <h3 id="answer-title">第二部分：综合循证回答</h3>
-            <span id="grounding-status" class="grounding-status">等待生成</span>
-          </div>
-          <div id="final-answer" class="final-answer">
-            <p class="empty-state">综合结论将在这里显示。</p>
-          </div>
-        </section>
-      </div>
-    </section>
-
-    <section class="evidence-workspace">
-      <section class="graph-panel" aria-labelledby="graph-title">
-        <div class="section-header compact">
-          <div>
-            <p class="eyebrow">DYNAMIC EVIDENCE GRAPH</p>
-            <h2 id="graph-title">本次查询证据关系</h2>
-          </div>
-          <span id="graph-meta" class="graph-meta">0 个节点 · 0 条关系</span>
-        </div>
-        <div class="relation-legend" aria-label="证据关系图例">
-          <span data-relation="supports"><i></i>支持</span>
-          <span data-relation="updates"><i></i>更新</span>
-          <span data-relation="supplements"><i></i>补充</span>
-          <span data-relation="confirms"><i></i>确认</span>
-          <span data-relation="conflicts"><i></i>冲突</span>
-          <span data-relation="cautions"><i></i>警示</span>
-        </div>
         <div class="graph-frame">
-          <svg id="evidence-graph" role="img" aria-label="本次查询的证据节点与关系"></svg>
-          <p id="graph-empty" class="graph-empty">尚未生成查询图谱</p>
+          <svg id="evidence-graph" class="graph-stage" role="img" aria-label="证据节点与关系图"></svg>
+          <div id="graph-empty" class="graph-empty">尚未生成查询图谱</div>
         </div>
+
+        <div id="analysis-chips" class="analysis-chips" aria-live="polite">
+          <span class="analysis-chip neutral">等待分析</span>
+        </div>
+
+        <section class="decision-strip" aria-labelledby="decision-title">
+          <div class="decision-accent" aria-hidden="true"></div>
+          <div>
+            <p id="decision-title" class="decision-label">证据合成</p>
+            <p id="decision-summary" class="decision-text">检索完成后显示证据规模、关系和综合结论。</p>
+          </div>
+        </section>
       </section>
 
-      <aside class="sources-panel" aria-labelledby="sources-title">
-        <div class="section-header compact">
-          <div>
-            <p class="eyebrow">RETRIEVED SOURCES</p>
-            <h2 id="sources-title">来源与命中片段</h2>
+      <aside class="evidence-rail">
+        <div class="evidence-inventory">
+          <div class="section-heading-row inventory-heading">
+            <div>
+              <p class="eyebrow">INVENTORY</p>
+              <h2 class="section-title">证据库存</h2>
+            </div>
+            <span id="source-count" class="count-badge">0</span>
           </div>
-          <span id="source-count" class="count-badge">0</span>
+          <div id="source-list" class="evidence-list source-list" aria-live="polite">
+            <p class="empty-state">尚无来源</p>
+          </div>
         </div>
-        <div id="source-list" class="source-list" aria-live="polite">
-          <p class="empty-state">尚无来源</p>
-        </div>
-        <section id="source-detail" class="source-detail" aria-labelledby="source-detail-title">
-          <h3 id="source-detail-title">文献详情</h3>
+
+        <section id="source-detail" class="evidence-detail source-detail" aria-labelledby="source-detail-title">
+          <p class="eyebrow">SELECTED EVIDENCE</p>
+          <h3 id="source-detail-title" class="section-title">文献详情</h3>
           <p class="empty-state">选择来源后查看书目信息和命中正文。</p>
         </section>
       </aside>
     </section>
+
+    <section id="report-workspace" class="report-section" aria-labelledby="report-title">
+      <div class="report-header">
+        <div>
+          <p class="eyebrow">AUDITABLE REPORT</p>
+          <h2 id="report-title">循证报告</h2>
+        </div>
+        <div class="report-badges">
+          <span id="retrieval-mode" class="report-model">尚未检索</span>
+          <span id="report-model" class="report-model">尚未生成</span>
+        </div>
+      </div>
+
+      <div class="report-grid">
+        <section class="reasoning-column" aria-labelledby="reasoning-title">
+          <h3 id="reasoning-title">第一部分：循证思考过程</h3>
+          <div id="reasoning-steps" class="reasoning-steps">
+            <p class="empty-state">尚无推理结果</p>
+          </div>
+        </section>
+
+        <section class="answer-column" aria-labelledby="answer-title">
+          <div class="answer-heading-row">
+            <h3 id="answer-title">第二部分：综合文献结论</h3>
+            <span id="grounding-status" class="grounding-badge">等待生成</span>
+          </div>
+          <div id="final-answer" class="final-answer">
+            <p class="empty-state">尚无综合文献结论</p>
+          </div>
+        </section>
+      </div>
+    </section>
   </main>
 
   <footer class="app-footer">
-    科研演示系统。输出用于辅助证据核验，不替代临床专业判断。
+    科研演示系统。结果来自当前本地知识库与所配置模型，用于辅助证据核验，不替代临床专业判断。
   </footer>
+
   <div id="toast" class="toast" role="alert" aria-live="assertive" hidden></div>
   <script src="/app.js" defer></script>
 </body>

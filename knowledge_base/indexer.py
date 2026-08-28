@@ -325,6 +325,13 @@ class Indexer:
             embedding_limit=embedding_limit,
             should_pause=should_pause,
         )
+        prune_fulltext = getattr(self.vector_store, "prune_fulltext", None)
+        if (
+            confirm_embedding_cost
+            and embedding.pending_embeddings == 0
+            and callable(prune_fulltext)
+        ):
+            prune_fulltext(self.store.list_chunk_ids())
         stage_counters["embedding"] = {
             "processed": embedding.completed_embeddings,
             "skipped": embedding.skipped_embeddings,
@@ -412,6 +419,21 @@ class Indexer:
                     completed += 1
                 else:
                     failed += 1
+            pending_now = len(all_pending) - completed
+            progress = {
+                "stage": "embedding",
+                "stage_counters": {
+                    "embedding": {
+                        "processed": completed,
+                        "skipped": skipped,
+                        "failed": failed,
+                    }
+                },
+                "pending_embedding_count": pending_now,
+                "total_embedding_count": total_candidates,
+            }
+            if not self.store.update_job_running_progress(self.JOB_ID, progress):
+                break
             if self._pause_requested(should_pause):
                 break
 
@@ -592,6 +614,7 @@ def build_default_pipeline(
     *,
     store: SQLiteStore,
     ocr: Callable[[bytes], str] | None = None,
+    allow_existing_metadata: bool = False,
 ) -> BuildPipeline:
     """Compose the local CSV/PDF pipeline without contacting a model provider."""
 
@@ -603,18 +626,24 @@ def build_default_pipeline(
     csv_paths = tuple(sorted(source.rglob("*.csv")))
     pdf_paths = tuple(sorted(source.rglob("*.pdf")))
     if not csv_paths:
-        raise KnowledgeBaseError(
-            "metadata_missing", "No metadata CSV was found in the source directory"
-        )
+        metadata_count = int(store.statistics().get("metadata_records", 0) or 0)
+        if not allow_existing_metadata or metadata_count == 0:
+            raise KnowledgeBaseError(
+                "metadata_missing", "No metadata CSV was found in the source directory"
+            )
 
     parser = PDFParser(ocr=ocr if ocr is not None else rapidocr_ocr_factory())
     parsed_cache: dict[str, ParsedPDF] = {}
     pdf_hash_cache: dict[Path, str] = {}
-    metadata_fingerprint = _combined_file_hash(csv_paths)
+    metadata_fingerprint = (
+        _combined_file_hash(csv_paths) if csv_paths else "existing-metadata"
+    )
     lookup_cache: dict[str, DocumentLookup] = {}
     canonical_pdf_cache: dict[Path, Path] = {}
 
     def metadata_items() -> Iterable[BuildItem]:
+        if not csv_paths:
+            return
         imported_rows = 0
         for csv_path in csv_paths:
             for _, document in load_csv_document_items(csv_path, diagnostics=[]):
@@ -701,6 +730,11 @@ def build_default_pipeline(
         return lookup
 
     def match_items() -> Iterable[BuildItem]:
+        if not csv_paths:
+            raise KnowledgeBaseError(
+                "metadata_source_required",
+                "PDF matching requires the original metadata CSV",
+            )
         lookup = document_lookup()
         canonical_paths = canonical_pdf_paths()
         for path in pdf_paths:
@@ -762,7 +796,7 @@ def build_default_pipeline(
     def parse_items() -> Iterable[BuildItem]:
         for file_record in store.list_files(("matched", "parsed", "partial", "parse_failed")):
             input_hash = sha256(
-                f"{file_record.sha256}|{file_record.document_id}|pdf-parser-v1".encode("utf-8")
+                f"{file_record.sha256}|{file_record.document_id}|pdf-parser-v2-layout".encode("utf-8")
             ).hexdigest()
 
             def parse_one(file_record=file_record) -> dict[str, int]:
@@ -800,7 +834,7 @@ def build_default_pipeline(
     def chunk_items() -> Iterable[BuildItem]:
         for file_record in store.list_files(("parsed", "partial")):
             input_hash = sha256(
-                f"{file_record.sha256}|{file_record.document_id}|chunker-v1".encode("utf-8")
+                f"{file_record.sha256}|{file_record.document_id}|chunker-v2-layout".encode("utf-8")
             ).hexdigest()
 
             def chunk_one(file_record=file_record) -> dict[str, int]:
@@ -861,7 +895,7 @@ def build_default_pipeline(
             "chunk": chunk_items,
             "lexical": lexical_items,
         },
-        algorithm_version="mpp-local-v1",
+        algorithm_version="mpp-local-v2-layout-rerank",
     )
 
 

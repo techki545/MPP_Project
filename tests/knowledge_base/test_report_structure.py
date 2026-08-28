@@ -19,6 +19,7 @@ def evidence(
     direction: str = "supports",
     aspect: str = "effectiveness",
     role: str = "core",
+    applicability: str = "not_assessed",
 ) -> tuple[EvidenceSource, EvidenceClaim]:
     title = f"{evidence_type} source {number}"
     statement = f"Grounded {aspect} finding from source {number}."
@@ -33,6 +34,7 @@ def evidence(
         page_ranges=(str(number),),
         fulltext=True,
         quality="moderate",
+        population_applicability=applicability,
     )
     claim = EvidenceClaim(
         claim_id=f"claim-{number}",
@@ -79,6 +81,23 @@ def test_deterministic_report_always_has_first_demo_six_steps() -> None:
     assert report.final_answer_markdown.startswith("## 综合回答")
 
 
+def test_report_distinguishes_direct_smpp_evidence_from_rmpp_extrapolation() -> None:
+    bundle = bundle_from(
+        (
+            evidence(1, "randomized_controlled_trial", 2025, applicability="direct"),
+            evidence(2, "systematic_review", 2024, applicability="indirect_rmpp"),
+        )
+    )
+
+    report = compose_deterministic_report("SMPP儿童是否应使用糖皮质激素？", bundle)
+
+    assert "直接证据 1 项" in report.analysis_steps[0]["body"]
+    assert "RMPP间接外推 1 项" in report.analysis_steps[0]["body"]
+    assert "以前者为主，后者仅作补充" in report.final_answer_markdown
+    assert "[直接证据]" in report.final_answer_markdown
+    assert "[RMPP间接外推]" in report.final_answer_markdown
+
+
 def test_deterministic_answer_is_conclusion_first_and_source_grounded() -> None:
     bundle = bundle_from(
         (
@@ -99,7 +118,7 @@ def test_deterministic_answer_is_conclusion_first_and_source_grounded() -> None:
     report = compose_deterministic_report("Clinical question", bundle)
 
     first_paragraph = report.final_answer_markdown.split("\n\n", 2)[1]
-    assert first_paragraph.startswith("**结论：")
+    assert first_paragraph.startswith("**综合文献结论：")
     assert report.final_answer_markdown.index("### 证据链") < (
         report.final_answer_markdown.index("### 时间更新")
     )
@@ -152,6 +171,26 @@ def test_yes_no_question_receives_an_explicit_answer_in_the_conclusion() -> None
     first_paragraph = report.final_answer_markdown.split("\n\n", 2)[1]
     assert "倾向于“是”" in first_paragraph
     assert "重症支原体肺炎儿童是否应使用糖皮质激素" in first_paragraph
+
+
+def test_yes_no_question_uses_relevant_supplements_when_core_direction_is_missing() -> None:
+    bundle = bundle_from(
+        (
+            evidence(
+                1,
+                "observational_study",
+                2024,
+                direction="supports",
+                role="supplement",
+            ),
+        )
+    )
+
+    report = compose_deterministic_report(
+        "重症支原体肺炎儿童是否应使用糖皮质激素？", bundle
+    )
+
+    assert "倾向于“是”" in report.final_answer_markdown.split("\n\n", 2)[1]
 
 
 def test_evidence_chain_excludes_unvalidated_sources_and_internal_citations() -> None:
@@ -243,8 +282,65 @@ def test_open_medication_question_returns_grounded_drug_options() -> None:
     )
 
     assert "核心用药信息" in report.final_answer_markdown
-    assert "阿奇霉素（10 mg/kg/day）[1]" in report.final_answer_markdown
+    assert "阿奇霉素(10 mg/kg/day)[1]" in report.final_answer_markdown
     assert "不能形成肯定或否定建议" not in report.final_answer_markdown
+
+
+def test_broad_duration_question_does_not_equate_one_drug_with_total_course() -> None:
+    antibiotic_source, antibiotic_claim = evidence(
+        1,
+        "guideline",
+        2024,
+        direction="uncertain",
+        aspect="timing",
+    )
+    steroid_source, steroid_claim = evidence(
+        2,
+        "systematic_review",
+        2023,
+        direction="uncertain",
+        aspect="timing",
+    )
+    antibiotic_claim = replace(
+        antibiotic_claim,
+        intervention="阿奇霉素",
+        statement=(
+            "1.2 方法对照组：阿奇霉素（某制药有限公司，国药准字H10000000），"
+            "连续用药3 d后停药，间隔4 d后再次给药，如此循环，连续治疗2周。"
+        ),
+        source_quote=(
+            "1.2 方法对照组：阿奇霉素（某制药有限公司，国药准字H10000000），"
+            "连续用药3 d后停药，间隔4 d后再次给药，如此循环，连续治疗2周。"
+        ),
+    )
+    steroid_claim = replace(
+        steroid_claim,
+        intervention="甲泼尼龙",
+        statement="甲泼尼龙常见疗程为3至5天，后续是否减量应依据病情。",
+        source_quote="甲泼尼龙常见疗程为3至5天，后续是否减量应依据病情。",
+    )
+    claims = (antibiotic_claim, steroid_claim)
+    sources = (antibiotic_source, steroid_source)
+    graph = LocalGraphBuilder().build("疗程问题", claims).as_dict()
+    bundle = EvidenceBundle(
+        sources=sources,
+        graph=build_document_graph(sources, claims, graph),
+        claims=claims,
+    )
+
+    report = compose_deterministic_report(
+        "重症支原体肺炎儿童治疗周期是多长时间？",
+        bundle,
+    )
+    direct_answer = report.final_answer_markdown.split("### 证据链", 1)[0]
+
+    assert "没有一个可由当前文献统一概括的固定“总治疗周期”" in direct_answer
+    assert "不能把阿奇霉素或任何一种药物的疗程等同于全部治疗周期" in direct_answer
+    assert "抗菌治疗" in direct_answer
+    assert "抗炎或免疫治疗" in direct_answer
+    assert "制药有限公司" not in direct_answer
+    assert "[1]" in direct_answer
+    assert "[2]" in direct_answer
 
 
 def test_medication_answer_normalizes_drug_names_from_grounded_ocr_text() -> None:

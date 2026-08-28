@@ -393,7 +393,7 @@ def test_production_pipeline_request_chat_replaces_all_default_chat_components(
         "question", SearchFilters(), chat_client=request_chat
     )
 
-    assert len(request_chat.calls) == 1
+    assert len(request_chat.calls) == 2
     assert default_chat.calls == []
     assert result["model_used"] is True
     assert result["model_name"] == "request-model"

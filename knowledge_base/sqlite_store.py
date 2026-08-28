@@ -783,6 +783,13 @@ class SQLiteStore:
             chunk_count = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
         return int(metadata_count) + int(chunk_count)
 
+    def list_chunk_ids(self) -> list[str]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT chunk_id FROM chunks ORDER BY chunk_id"
+            ).fetchall()
+        return [str(row["chunk_id"]) for row in rows]
+
     def statistics(self) -> dict[str, int]:
         with self._connection() as connection:
             unique_documents = connection.execute(

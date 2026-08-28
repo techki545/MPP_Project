@@ -60,5 +60,5 @@ def test_chat_client_explicitly_requests_json_in_every_system_message() -> None:
 
     system_message = captured["messages"][0]["content"]
     assert "json" in system_message.casefold()
-    assert captured["max_tokens"] == 4096
+    assert captured["max_tokens"] == 6144
     assert captured["thinking"] == {"type": "disabled"}

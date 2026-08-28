@@ -28,8 +28,9 @@ from .reporter import (
     GroundedClaimExtractor,
     GroundedReporter,
     extractive_fallback_claims,
+    filter_claims_for_question,
 )
-from .retriever import HybridRetriever
+from .retriever import HybridRetriever, build_query_context
 from .sqlite_store import SQLiteStore
 from .vector_store import LocalVectorStore
 
@@ -50,6 +51,7 @@ class KnowledgeBaseService:
         "model_name",
         "model_error",
         "summary",
+        "query_context",
         "sources",
         "graph",
         "retrieval_stats",
@@ -122,6 +124,7 @@ class KnowledgeBaseService:
             "model_name": str(result.get("model_name", self.settings.chat_model)),
             "model_error": result.get("model_error"),
             "summary": dict(result.get("summary", {})),
+            "query_context": dict(result.get("query_context", {})),
             "sources": sources,
             "graph": dict(result.get("graph", {"nodes": [], "edges": []})),
             "retrieval_stats": dict(result.get("retrieval_stats", {})),
@@ -188,6 +191,7 @@ class KnowledgeBaseService:
             job = build_status()
             progress = dict(job.get("progress", {})) if job else {}
             counts["build_state"] = str(job.get("state", "idle")) if job else "idle"
+            counts["build_progress"] = progress
             counts["embedding_pending"] = int(
                 progress.get("pending_embedding_count", 0) or 0
             )
@@ -212,6 +216,8 @@ class KnowledgeBaseService:
             "configured": configured,
             "chat_model": self.settings.chat_model,
             "embedding_model": self.settings.embedding_model,
+            "embedding_provider": self.settings.embedding_provider,
+            "local_embedding_ready": self.settings.local_embedding_ready,
             "api_base_configured": bool(self.settings.api_base),
         }
 
@@ -334,18 +340,15 @@ class ProductionQueryPipeline:
             for index, item in enumerate(retrieval.documents, start=1)
         )
         empty_bundle = EvidenceBundle(sources=sources, graph={"nodes": [], "edges": []})
-        claim_error: str | None = None
         try:
             validated = claim_extractor.extract(question, empty_bundle)
             if not validated.claims:
-                claim_error = "claim_validation_empty"
-                validated = extractive_fallback_claims(sources)
-        except KnowledgeBaseError as error:
-            claim_error = error.code
-            validated = extractive_fallback_claims(sources)
+                validated = extractive_fallback_claims(sources, question=question)
+        except KnowledgeBaseError:
+            validated = extractive_fallback_claims(sources, question=question)
         except Exception:
-            claim_error = "claim_extraction_failed"
-            validated = extractive_fallback_claims(sources)
+            validated = extractive_fallback_claims(sources, question=question)
+        validated = filter_claims_for_question(question, validated)
         claim_graph = self.graph_builder.build(question, validated.claims).as_dict()
         graph = build_document_graph(
             sources,
@@ -358,13 +361,23 @@ class ProductionQueryPipeline:
             graph=graph,
             claims=validated.claims,
         )
-        report = reporter.generate_grounded_claim_report(
-            question,
-            bundle,
-            model_used=claim_error is None,
-            model_error=claim_error,
+        report = (
+            reporter.generate_with_fallback(question, bundle)
+            if validated.claims
+            else reporter.generate_grounded_claim_report(
+                question,
+                bundle,
+                model_used=False,
+                model_error="no_relevant_evidence",
+            )
         )
         relation_counts = Counter(edge["relation"] for edge in graph["edges"])
+        query_context = getattr(retrieval, "query_context", None)
+        query_context_payload = (
+            query_context.as_dict()
+            if query_context is not None and callable(getattr(query_context, "as_dict", None))
+            else build_query_context(question, filters).as_dict()
+        )
         return {
             "question": question,
             "mode": retrieval.mode,
@@ -385,6 +398,7 @@ class ProductionQueryPipeline:
                 "conflict_count": relation_counts["conflicts"],
                 "caution_count": relation_counts["cautions"],
             },
+            "query_context": query_context_payload,
             "sources": [source.as_dict() for source in sources],
             "graph": graph,
             "retrieval_stats": {
@@ -443,6 +457,15 @@ class ProductionQueryPipeline:
             quality=refined.quality,
             journal=str(detail.get("journal", "")),
             doi=str(detail.get("doi", "")),
+            population_applicability=str(
+                item.payload.get("population_applicability", "not_assessed")
+            ),
+            population_applicability_score=float(
+                item.payload.get("population_applicability_score", 0.5)
+            ),
+            question_relevance_score=float(
+                item.payload.get("question_relevance_score", 0.5)
+            ),
         )
 
 
@@ -454,6 +477,22 @@ class _UnavailableChatClient:
         raise KnowledgeBaseError("model_config_missing", "Chat model is not configured")
 
 
+def _create_embedding_client(settings: Settings) -> Any:
+    settings.require_embedding_access()
+    if settings.embedding_provider == "local":
+        from .local_embedding_client import LocalEmbeddingClient
+
+        return LocalEmbeddingClient(
+            model_path=settings.local_embedding_model_path,
+            tokenizer_path=settings.local_embedding_tokenizer_path,
+        )
+    return EmbeddingClient(
+        base_url=settings.api_base,
+        api_key=settings.api_key,
+        model=settings.embedding_model,
+    )
+
+
 def create_production_service(
     settings: Settings, store: SQLiteStore | None = None
 ) -> KnowledgeBaseService:
@@ -463,15 +502,28 @@ def create_production_service(
 
     embedding_client: Any = None
     vector_store: Any = None
-    if settings.api_base and settings.api_key and settings.embedding_model:
-        embedding_client = EmbeddingClient(
-            base_url=settings.api_base,
-            api_key=settings.api_key,
-            model=settings.embedding_model,
-        )
+    embedding_configured = (
+        settings.local_embedding_ready
+        if settings.embedding_provider == "local"
+        else bool(settings.api_base and settings.api_key and settings.embedding_model)
+    )
+    if embedding_configured:
+        embedding_client = _create_embedding_client(settings)
         try:
             candidate = LocalVectorStore(settings.qdrant_dir)
-            candidate.load_existing(model_name=settings.embedding_model)
+            try:
+                candidate.load_existing(model_name=settings.embedding_model)
+            except KnowledgeBaseError as error:
+                if (
+                    settings.embedding_provider == "local"
+                    and error.code == "vector_index_not_built"
+                ):
+                    candidate.ensure_collections(
+                        dimension=embedding_client.probe(),
+                        model_name=settings.embedding_model,
+                    )
+                else:
+                    raise
             vector_store = candidate
         except KnowledgeBaseError:
             if "candidate" in locals():
@@ -501,9 +553,18 @@ def create_production_service(
 class ProductionBuildRunner:
     """Bind the generic job interface to the resumable production indexer."""
 
-    def __init__(self, settings: Settings, store: SQLiteStore) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        store: SQLiteStore,
+        *,
+        embedding_client: Any | None = None,
+        vector_store: LocalVectorStore | None = None,
+    ) -> None:
         self.settings = settings
         self.store = store
+        self.embedding_client = embedding_client
+        self.vector_store = vector_store
 
     def build(
         self,
@@ -515,24 +576,24 @@ class ProductionBuildRunner:
         confirm_full_embedding_cost: bool = False,
         stage: str | None = None,
     ) -> Any:
-        embedding_client: EmbeddingClient | None = None
-        vector_store: LocalVectorStore | None = None
-        validate_embedding_cost_gate(
-            self.store,
-            model_name=self.settings.embedding_model,
-            confirm_embedding_cost=confirm_embedding_cost,
-            confirm_full_embedding_cost=confirm_full_embedding_cost,
-            embedding_limit=embedding_limit,
-        )
-        if confirm_embedding_cost:
-            self.settings.require_embedding_access()
-            embedding_client = EmbeddingClient(
-                base_url=self.settings.api_base,
-                api_key=self.settings.api_key,
-                model=self.settings.embedding_model,
+        embedding_client: Any = self.embedding_client
+        vector_store: LocalVectorStore | None = self.vector_store
+        owns_vector_store = False
+        if self.settings.embedding_provider == "remote":
+            validate_embedding_cost_gate(
+                self.store,
+                model_name=self.settings.embedding_model,
+                confirm_embedding_cost=confirm_embedding_cost,
+                confirm_full_embedding_cost=confirm_full_embedding_cost,
+                embedding_limit=embedding_limit,
             )
+        if confirm_embedding_cost:
+            if embedding_client is None:
+                embedding_client = _create_embedding_client(self.settings)
             dimension = embedding_client.probe()
-            vector_store = LocalVectorStore(self.settings.qdrant_dir)
+            if vector_store is None:
+                vector_store = LocalVectorStore(self.settings.qdrant_dir)
+                owns_vector_store = True
             vector_store.ensure_collections(
                 dimension=dimension,
                 model_name=self.settings.embedding_model,
@@ -547,9 +608,15 @@ class ProductionBuildRunner:
                 embedding_batch_size=self.settings.embedding_batch_size,
             )
             if stage in {"embedding", "vector"}:
-                pipeline = BuildPipeline(stages={}, algorithm_version="mpp-local-v1")
+                pipeline = BuildPipeline(
+                    stages={}, algorithm_version="mpp-local-v2-layout-rerank"
+                )
             else:
-                pipeline = build_default_pipeline(self.settings.source_dir, store=self.store)
+                pipeline = build_default_pipeline(
+                    self.settings.source_dir,
+                    store=self.store,
+                    allow_existing_metadata=stage is not None,
+                )
             if stage is not None:
                 allowed = {*BuildPipeline.LOCAL_STAGES, "embedding", "vector"}
                 if stage not in allowed:
@@ -567,7 +634,8 @@ class ProductionBuildRunner:
                 should_pause=should_pause,
             )
             if (
-                confirm_embedding_cost
+                self.settings.embedding_provider == "remote"
+                and confirm_embedding_cost
                 and not confirm_full_embedding_cost
                 and embedding_limit is not None
                 and result.stage_counters.get("embedding", {}).get("processed", 0) > 0
@@ -578,7 +646,7 @@ class ProductionBuildRunner:
                 )
             return result
         finally:
-            if vector_store is not None:
+            if owns_vector_store and vector_store is not None:
                 vector_store.close()
 
 

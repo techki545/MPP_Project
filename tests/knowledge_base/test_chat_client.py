@@ -25,7 +25,9 @@ def test_chat_client_reads_fixed_server_configuration() -> None:
     assert client.complete_json("system", {"task": "probe"}) == {"status": "ok"}
     assert captured["url"] == "https://provider.example/v1/chat/completions"
     assert captured["payload"]["model"] == "chat-model"
+    assert captured["payload"]["max_tokens"] == 6144
     assert captured["payload"]["response_format"] == {"type": "json_object"}
+    assert captured["timeout"] == 120.0
     assert captured["headers"]["Authorization"] == "Bearer secret"
 
 
@@ -165,3 +167,51 @@ def test_malformed_chat_content_is_rejected() -> None:
         client.complete_json("system", {"task": "probe"})
 
     assert captured.value.code == "chat_response_invalid"
+
+
+def test_transient_rate_limit_is_retried_with_bounded_backoff() -> None:
+    calls = 0
+    delays = []
+
+    def transport(url, headers, payload, timeout):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise HTTPError(url, 429, "rate limited", {}, BytesIO(b"busy"))
+        return {"choices": [{"message": {"content": '{"status":"ok"}'}}]}
+
+    client = ChatClient(
+        "https://provider.example/v1",
+        "secret",
+        "chat-model",
+        transport=transport,
+        sleep=delays.append,
+    )
+
+    assert client.complete_json("system", {"task": "probe"}) == {"status": "ok"}
+    assert calls == 3
+    assert delays == [1.0, 2.0]
+
+
+def test_transient_failure_does_not_poison_later_pipeline_calls() -> None:
+    calls = 0
+
+    def transport(url, headers, payload, timeout):
+        nonlocal calls
+        calls += 1
+        if calls <= 4:
+            raise HTTPError(url, 500, "temporary", {}, BytesIO(b"busy"))
+        return {"choices": [{"message": {"content": '{"status":"ok"}'}}]}
+
+    client = ChatClient(
+        "https://provider.example/v1",
+        "secret",
+        "chat-model",
+        transport=transport,
+        sleep=lambda seconds: None,
+    )
+
+    with pytest.raises(KnowledgeBaseError) as captured:
+        client.complete_json("system", {"task": "first"})
+    assert captured.value.code == "chat_unavailable"
+    assert client.complete_json("system", {"task": "second"}) == {"status": "ok"}

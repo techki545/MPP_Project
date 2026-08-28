@@ -65,6 +65,25 @@ def test_existing_dimension_or_model_manifest_mismatch_is_rejected() -> None:
         store.close()
 
 
+def test_prune_fulltext_removes_only_stale_chunk_vectors(tmp_path: Path) -> None:
+    store = LocalVectorStore(tmp_path / "vectors")
+    try:
+        store.ensure_collections(dimension=2, model_name="model-a")
+        store.upsert_fulltext(
+            [
+                ("current", [1.0, 0.0], {"document_id": "doc-a", "text": "current"}),
+                ("stale", [0.0, 1.0], {"document_id": "doc-b", "text": "stale"}),
+            ]
+        )
+
+        assert store.prune_fulltext(["current"]) == 1
+        hits = store.query_fulltext([0.0, 1.0], limit=5)
+
+        assert [hit.record_id for hit in hits] == ["current"]
+    finally:
+        store.close()
+
+
 def test_reopen_persistent_store_preserves_collection_manifest_and_points(tmp_path: Path) -> None:
     path = tmp_path / "qdrant"
     first = LocalVectorStore(path)

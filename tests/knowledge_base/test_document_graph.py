@@ -77,6 +77,7 @@ def test_document_graph_projects_claim_edges_to_sources() -> None:
             "title": "Clinical guideline",
             "evidence_type": "guideline",
             "year": 2023,
+            "population_applicability": "not_assessed",
             "quality": "moderate",
         },
     }

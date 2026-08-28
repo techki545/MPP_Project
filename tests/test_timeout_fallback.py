@@ -124,7 +124,11 @@ def test_timeout_still_returns_extractable_synthesis_and_relation_graph() -> Non
     assert result["retrieval_stats"]["claim_count"] == 3
     assert len(result["graph"]["nodes"]) == 3
     assert {node["node_type"] for node in result["graph"]["nodes"]} == {"document"}
-    assert result["graph"]["edges"] == []
+    assert len(result["graph"]["edges"]) == 3
+    assert {edge["relation"] for edge in result["graph"]["edges"]} == {
+        "supplements"
+    }
+    assert all(edge["source_claim_ids"] for edge in result["graph"]["edges"])
     assert len(result["reasoning_steps"]) == 6
     assert [step["stage_key"] for step in result["reasoning_steps"]] == [
         "inventory",
@@ -192,8 +196,9 @@ def test_report_generation_sends_a_bounded_evidence_payload() -> None:
 
     sent_sources = client.payloads[0]["evidence_bundle"]["sources"]
     assert len(sent_sources) == 8
-    assert all(sum(map(len, source["snippets"])) <= 1600 for source in sent_sources)
-    assert all(len(source["abstract"]) <= 1200 for source in sent_sources)
+    assert all("snippets" not in source for source in sent_sources)
+    assert all("abstract" not in source for source in sent_sources)
+    assert all("quote_options" not in source for source in sent_sources)
 
 
 def test_claim_validation_allows_unreported_optional_descriptors() -> None:

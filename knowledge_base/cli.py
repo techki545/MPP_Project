@@ -20,6 +20,7 @@ from .indexer import (
 )
 from .models import SearchFilters
 from .service import create_production_service
+from .service import _create_embedding_client
 from .sqlite_store import SQLiteStore
 from .vector_store import LocalVectorStore
 
@@ -130,22 +131,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 full_confirmation = bool(args.confirm_full_embedding_cost)
                 confirm_cost = bool(args.confirm_embedding_cost or full_confirmation)
                 embedding_limit = getattr(args, "embedding_limit", None)
-                validate_embedding_cost_gate(
-                    store,
-                    model_name=settings.embedding_model,
-                    confirm_embedding_cost=confirm_cost,
-                    confirm_full_embedding_cost=full_confirmation,
-                    embedding_limit=embedding_limit,
-                )
-                vector_store: LocalVectorStore | None = None
-                embedding_client: EmbeddingClient | None = None
-                if confirm_cost:
-                    settings.require_embedding_access()
-                    embedding_client = EmbeddingClient(
-                        base_url=settings.api_base,
-                        api_key=settings.api_key,
-                        model=settings.embedding_model,
+                if settings.embedding_provider == "remote":
+                    validate_embedding_cost_gate(
+                        store,
+                        model_name=settings.embedding_model,
+                        confirm_embedding_cost=confirm_cost,
+                        confirm_full_embedding_cost=full_confirmation,
+                        embedding_limit=embedding_limit,
                     )
+                vector_store: LocalVectorStore | None = None
+                embedding_client: object | None = None
+                if confirm_cost:
+                    embedding_client = _create_embedding_client(settings)
                     dimension = embedding_client.probe()
                     vector_store = LocalVectorStore(settings.qdrant_dir)
                     vector_store.ensure_collections(
@@ -159,10 +156,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                         embedding_client=embedding_client,
                         vector_store=vector_store,
                     )
-                    pipeline = build_default_pipeline(settings.source_dir, store=store)
-                    if args.command == "retry" and args.stage in BuildPipeline.LOCAL_STAGES:
+                    retry_stage = args.stage if args.command == "retry" else None
+                    if retry_stage in {"embedding", "vector"}:
                         pipeline = BuildPipeline(
-                            stages={args.stage: pipeline.stages[args.stage]},
+                            stages={}, algorithm_version="mpp-local-v2-layout-rerank"
+                        )
+                    else:
+                        pipeline = build_default_pipeline(
+                            settings.source_dir,
+                            store=store,
+                            allow_existing_metadata=args.command == "retry",
+                        )
+                    if retry_stage in BuildPipeline.LOCAL_STAGES:
+                        pipeline = BuildPipeline(
+                            stages={retry_stage: pipeline.stages[retry_stage]},
                             algorithm_version=pipeline.algorithm_version,
                         )
                     result = indexer.build(
@@ -172,7 +179,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         confirm_embedding_cost=confirm_cost,
                     )
                     if (
-                        confirm_cost
+                        settings.embedding_provider == "remote"
+                        and confirm_cost
                         and not full_confirmation
                         and embedding_limit is not None
                         and result.stage_counters.get("embedding", {}).get("processed", 0)
@@ -210,7 +218,7 @@ def _make_indexer(
     settings: Settings,
     store: SQLiteStore,
     *,
-    embedding_client: EmbeddingClient | None = None,
+    embedding_client: object | None = None,
     vector_store: LocalVectorStore | None = None,
 ) -> Indexer:
     return Indexer(

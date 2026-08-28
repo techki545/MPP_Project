@@ -38,6 +38,30 @@ def test_default_data_path_is_project_local(tmp_path: Path):
     assert settings.data_dir == tmp_path / ".local" / "knowledge_base"
 
 
+def test_local_embedding_is_the_default_and_uses_project_local_model(tmp_path: Path):
+    settings = Settings.from_mapping({}, project_root=tmp_path)
+
+    assert settings.embedding_provider == "local"
+    assert settings.embedding_model == "intfloat/multilingual-e5-small"
+    assert settings.local_embedding_model_path == (
+        tmp_path
+        / ".local"
+        / "models"
+        / "multilingual-e5-small"
+        / "onnx"
+        / "model.onnx"
+    )
+
+
+def test_invalid_embedding_provider_has_stable_error(tmp_path: Path):
+    with pytest.raises(ConfigurationError) as captured:
+        Settings.from_mapping(
+            {"MPP_EMBEDDING_PROVIDER": "unknown"}, project_root=tmp_path
+        )
+
+    assert captured.value.code == "invalid_embedding_provider"
+
+
 def test_settings_repr_does_not_expose_api_key(tmp_path: Path):
     settings = Settings.from_mapping(
         {"MPP_API_KEY": "not-a-real-secret-for-tests"}, project_root=tmp_path
@@ -62,6 +86,7 @@ def test_require_chat_access_reports_exact_missing_fields():
 def test_embedding_access_does_not_require_chat_model():
     settings = Settings.from_mapping(
         {
+            "MPP_EMBEDDING_PROVIDER": "remote",
             "MPP_API_BASE": "https://provider.example/v1",
             "MPP_API_KEY": "local-test-secret",
         },

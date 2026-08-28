@@ -28,6 +28,15 @@ const RELATION_LABELS = {
   cautions: "警示",
 };
 
+const APPLICABILITY_LABELS = {
+  direct: "直接证据",
+  indirect_rmpp: "RMPP 间接外推",
+  indirect_smpp: "SMPP 间接外推",
+  general_mpp: "一般 MPP 证据",
+  unclear: "人群不明确",
+  not_assessed: "未评估适用性",
+};
+
 const TYPE_STYLES = {
   guideline: { color: "#176b4d", soft: "#e8f3ed" },
   systematic_review: { color: "#315f75", soft: "#eaf1f5" },
@@ -66,8 +75,11 @@ const MODEL_ERROR_MESSAGES = Object.freeze({
   chat_timeout: "模型服务响应超时，请稍后重试。",
   chat_request_rejected: "模型服务拒绝了请求，请检查 API 地址、模型名及接口兼容性。",
   chat_unavailable: "模型服务暂时不可用，请稍后重试。",
-  chat_response_invalid: "模型响应格式无法解析，已使用确定性回退结果。",
-  model_config_missing: "未配置模型，已使用确定性回退结果。",
+  chat_response_invalid: "模型响应格式无法解析，已使用本地证据综合。",
+  ungrounded_model_response: "模型回答未通过引用校验，已使用本地证据综合。",
+  model_generation_failed: "模型未能完成综合，已使用本地证据综合。",
+  no_relevant_evidence: "未形成可验证的相关声明，已使用本地证据综合。",
+  model_config_missing: "未配置模型，已使用本地证据综合。",
 });
 
 const state = {
@@ -132,6 +144,7 @@ function cacheDom() {
     runQuery: document.querySelector("#run-query"),
     queryStatus: document.querySelector("#query-status"),
     filters: document.querySelector("#evidence-filters"),
+    toggleAllTypes: document.querySelector("#toggle-all-types"),
     yearFrom: document.querySelector("#year-from"),
     yearTo: document.querySelector("#year-to"),
     fulltextOnly: document.querySelector("#fulltext-only"),
@@ -139,6 +152,8 @@ function cacheDom() {
     apiKey: document.querySelector("#api-key"),
     chatModelName: document.querySelector("#chat-model-name"),
     toggleApiKey: document.querySelector("#toggle-api-key"),
+    modelSettings: document.querySelector("#model-service"),
+    focusSettings: document.querySelector("#focus-settings"),
     kbStatus: document.querySelector("#kb-status"),
     modelStatus: document.querySelector("#model-status"),
     dataSourceLabel: document.querySelector("#data-source-label"),
@@ -167,6 +182,8 @@ function cacheDom() {
     graph: document.querySelector("#evidence-graph"),
     graphEmpty: document.querySelector("#graph-empty"),
     graphMeta: document.querySelector("#graph-meta"),
+    analysisChips: document.querySelector("#analysis-chips"),
+    decisionSummary: document.querySelector("#decision-summary"),
     sourceList: document.querySelector("#source-list"),
     sourceCount: document.querySelector("#source-count"),
     sourceDetail: document.querySelector("#source-detail"),
@@ -180,6 +197,9 @@ function bindEvents() {
     input.addEventListener("input", handleModelConfigInput);
   });
   dom.toggleApiKey.addEventListener("click", toggleApiKeyVisibility);
+  dom.toggleAllTypes.addEventListener("click", toggleAllEvidenceTypes);
+  dom.filters.addEventListener("change", syncToggleAllTypesLabel);
+  dom.focusSettings.addEventListener("click", focusModelSettings);
   dom.runQuery.addEventListener("click", runQuery);
   dom.buildKb.addEventListener("click", () => startBuild());
   dom.continueKb.addEventListener("click", continueEmbedding);
@@ -271,6 +291,28 @@ function toggleApiKeyVisibility() {
   dom.apiKey.focus({ preventScroll: true });
 }
 
+function toggleAllEvidenceTypes() {
+  const checkboxes = Array.from(dom.filters.querySelectorAll("input[type='checkbox']"));
+  const shouldSelectAll = checkboxes.some((checkbox) => !checkbox.checked);
+  checkboxes.forEach((checkbox) => {
+    checkbox.checked = shouldSelectAll;
+  });
+  syncToggleAllTypesLabel();
+}
+
+function syncToggleAllTypesLabel() {
+  const checkboxes = Array.from(dom.filters.querySelectorAll("input[type='checkbox']"));
+  dom.toggleAllTypes.textContent = checkboxes.length && checkboxes.every((checkbox) => checkbox.checked)
+    ? "全不选"
+    : "全选";
+}
+
+function focusModelSettings() {
+  dom.modelSettings.open = true;
+  dom.modelSettings.scrollIntoView({ behavior: "smooth", block: "center" });
+  dom.modelApiBase.focus({ preventScroll: true });
+}
+
 function renderSystemStatus(health, kbStatus, modelStatus) {
   const ready = kbStatus.status === "ready";
   setStatusPill(
@@ -349,6 +391,7 @@ function renderEvidenceFilters(items) {
     label.append(checkbox, swatch, text);
     dom.filters.append(label);
   });
+  syncToggleAllTypesLabel();
 }
 
 async function runQuery() {
@@ -391,7 +434,7 @@ async function runQuery() {
   if (modelConfig) payload.model_config = modelConfig;
 
   setQueryBusy(true);
-  setQueryStatus("正在执行四路检索、证据重排与关系构建…", "loading");
+  setQueryStatus("正在执行向量检索、证据重排与文献结论综合…", "loading");
   try {
     const result = await fetchJson("/api/query", {
       method: "POST",
@@ -407,7 +450,7 @@ async function runQuery() {
     const warnings = queryResultWarnings(result);
     const warningSuffix = warnings.length ? ` ${warnings.join(" ")}` : "";
     setQueryStatus(
-      `分析完成，共返回 ${result.sources?.length || 0} 项来源。${warningSuffix}`,
+      `综合完成，共返回 ${result.sources?.length || 0} 项来源。${warningSuffix}`,
       warnings.length ? "warning" : "ready"
     );
     dom.dataSourceLabel.textContent = result.data_source === "demo" ? "示例证据模式" : "真实本地语料";
@@ -424,7 +467,7 @@ async function runQuery() {
 function setQueryBusy(busy) {
   dom.runQuery.disabled = busy;
   const label = dom.runQuery.querySelector("span");
-  label.textContent = busy ? "正在分析" : "开始循证分析";
+  label.textContent = busy ? "正在综合" : "开始循证分析";
 }
 
 function setQueryStatus(message, status) {
@@ -450,9 +493,10 @@ function renderReport(result) {
   dom.retrievalMode.textContent = retrievalModeLabel(result.mode, result.degraded_reason);
   dom.reportModel.textContent = result.model_used
     ? `模型：${result.model_name || "已配置"}`
-    : "确定性回退";
-  dom.groundingStatus.textContent = result.model_used ? "引用已校验" : "模型结果未采用";
-  dom.groundingStatus.dataset.state = result.model_used ? "ready" : "warning";
+    : "本地证据综合";
+  dom.groundingStatus.textContent = result.model_used ? "模型综合已采用" : "引用已校验";
+  dom.groundingStatus.dataset.state = "ready";
+  renderAnalysisSummary(result);
 
   dom.reasoningSteps.replaceChildren();
   const steps = Array.isArray(result.reasoning_steps) ? result.reasoning_steps : [];
@@ -473,6 +517,74 @@ function renderReport(result) {
     });
   }
   renderMarkdown(dom.finalAnswer, result.answer_markdown || "暂无综合回答。\n");
+}
+
+function renderAnalysisSummary(result) {
+  const summary = result.summary && typeof result.summary === "object" ? result.summary : {};
+  const queryContext = result.query_context && typeof result.query_context === "object"
+    ? result.query_context
+    : {};
+  const evidenceCount = Number(summary.evidence_count ?? result.sources?.length ?? 0);
+  const relationCount = Number(summary.relation_count ?? result.graph?.edges?.length ?? 0);
+  const updateCount = Number(summary.update_count ?? 0);
+  const conflictCount = Number(summary.conflict_count ?? 0);
+  const chips = [
+    ...queryUnderstandingChips(queryContext),
+    { text: `${evidenceCount} 项证据`, className: "good" },
+    { text: `${relationCount} 条关系`, className: "neutral" },
+    { text: `${updateCount} 项时间更新`, className: updateCount ? "update" : "neutral" },
+    { text: `${conflictCount} 项冲突`, className: conflictCount ? "warning" : "neutral" },
+  ];
+  dom.analysisChips.replaceChildren();
+  chips.forEach((item) => {
+    const chip = document.createElement("span");
+    chip.className = `analysis-chip ${item.className}`;
+    chip.textContent = item.text;
+    dom.analysisChips.append(chip);
+  });
+
+  dom.decisionSummary.textContent = [
+    queryContext.question_type
+      ? `识别为${questionTypeLabel(queryContext.question_type)}`
+      : "未限定临床问题类型",
+    Array.isArray(queryContext.subquestions) && queryContext.subquestions.length
+      ? `已拆分 ${queryContext.subquestions.length} 个补充向量查询`
+      : "使用原问题执行向量检索",
+    `已完成 ${evidenceCount} 项来源的分层检索`,
+    `识别 ${relationCount} 条证据关系`,
+    updateCount ? `其中 ${updateCount} 项较新证据更新既有结论` : "未识别到明确的时间更新信号",
+    conflictCount ? `并发现 ${conflictCount} 项冲突，需在报告中重点核验。` : "各层证据方向未见明确冲突。",
+  ].join("；");
+}
+
+function queryUnderstandingChips(context) {
+  const chips = [];
+  if (context.question_type) {
+    chips.push({ text: questionTypeLabel(context.question_type), className: "good" });
+  }
+  const pico = context.pico && typeof context.pico === "object" ? context.pico : {};
+  [
+    ["P", pico.population],
+    ["I", pico.intervention],
+    ["C", pico.comparator],
+    ["O", pico.outcome],
+  ].forEach(([label, values]) => {
+    if (!Array.isArray(values) || !values.length) return;
+    chips.push({ text: `${label} · ${values.slice(0, 2).join(" / ")}`, className: "neutral" });
+  });
+  return chips;
+}
+
+function questionTypeLabel(value) {
+  return {
+    treatment: "治疗问题",
+    diagnosis: "诊断问题",
+    prognosis: "预后问题",
+    etiology: "病因问题",
+    safety: "安全性问题",
+    prevention: "预防问题",
+    general: "一般临床问题",
+  }[value] || "临床问题";
 }
 
 function retrievalModeLabel(mode, reason) {
@@ -556,6 +668,9 @@ function citationButton(number) {
   button.className = "citation-button";
   button.dataset.sourceNumber = String(number);
   button.setAttribute("aria-label", `查看来源 ${number}`);
+  const source = state.sources.get(number);
+  const firstPage = Array.isArray(source?.page_ranges) ? source.page_ranges.find(Boolean) : "";
+  button.title = firstPage ? `来源 ${number} · 第 ${firstPage} 页` : `查看来源 ${number}`;
   button.textContent = `[${number}]`;
   return button;
 }
@@ -594,7 +709,8 @@ function renderSources(sources) {
     meta.append(
       textSpan(TYPE_LABELS[source.evidence_type] || source.evidence_type || "未分类"),
       textSpan(source.year ? String(source.year) : "年份未知"),
-      textSpan(source.fulltext ? "全文命中" : "元数据命中")
+      textSpan(source.fulltext ? "全文命中" : "元数据命中"),
+      textSpan(APPLICABILITY_LABELS[source.population_applicability] || "适用性未知")
     );
     copy.append(title, meta);
     button.append(number, copy);
@@ -657,6 +773,11 @@ function renderSourceDetail(detail, source) {
   addBibliographyRow(bibliography, "期刊 / 年份", [detail.journal, detail.year].filter(Boolean).join(" · ") || "未知");
   addBibliographyRow(bibliography, "DOI", detail.doi || "未提供");
   addBibliographyRow(bibliography, "证据类型", TYPE_LABELS[detail.evidence_type] || detail.evidence_type || "未分类");
+  addBibliographyRow(
+    bibliography,
+    "人群适用性",
+    APPLICABILITY_LABELS[source.population_applicability] || "适用性未知"
+  );
   addBibliographyRow(bibliography, "质量", qualityLabel(detail.quality));
   addBibliographyRow(bibliography, "全文状态", detail.has_fulltext ? `可用 · ${detail.fulltext_status || "已解析"}` : "仅元数据");
   dom.sourceDetail.append(heading, bibliography);
@@ -687,7 +808,20 @@ function renderSourceDetail(detail, source) {
       text.textContent = snippet.text || "";
       const meta = document.createElement("small");
       meta.textContent = `${snippet.section || "未标注章节"} · 第 ${pageRange(snippet.page_start, snippet.page_end)} 页${snippet.is_ocr ? " · OCR" : ""}`;
-      item.append(text, meta);
+      const footer = document.createElement("div");
+      footer.className = "snippet-footer";
+      footer.append(meta);
+      if (detail.pdf_available && snippet.page_start) {
+        const locator = document.createElement("a");
+        locator.className = "snippet-page-link";
+        locator.href = pdfPageHref(detail.document_id, snippet.page_start);
+        locator.target = "_blank";
+        locator.rel = "noopener";
+        locator.textContent = `PDF · 第 ${snippet.page_start} 页 ↗`;
+        locator.title = `在 PDF 中定位到第 ${snippet.page_start} 页`;
+        footer.append(locator);
+      }
+      item.append(text, footer);
       snippetList.append(item);
     });
   }
@@ -696,12 +830,18 @@ function renderSourceDetail(detail, source) {
   if (detail.pdf_available) {
     const link = document.createElement("a");
     link.className = "pdf-link";
-    link.href = `/api/documents/${encodeURIComponent(detail.document_id)}/pdf`;
+    const firstPage = snippets.find((snippet) => snippet.page_start)?.page_start;
+    link.href = pdfPageHref(detail.document_id, firstPage);
     link.target = "_blank";
     link.rel = "noopener";
     link.textContent = "在浏览器中查看 PDF";
     dom.sourceDetail.append(link);
   }
+}
+
+function pdfPageHref(documentId, page) {
+  const base = `/api/documents/${encodeURIComponent(documentId)}/pdf`;
+  return page ? `${base}#page=${Number(page)}` : base;
 }
 
 function querySourceSnippets(source) {
@@ -773,6 +913,213 @@ function pageRange(start, end) {
 }
 
 function renderGraph(graph = state.graph) {
+  renderLaneGraph(graph);
+}
+
+function renderRelationChainGraph(rawGraph) {
+  state.graph = rawGraph;
+  const nodes = (Array.isArray(rawGraph.nodes) ? rawGraph.nodes : [])
+    .slice(0, 10)
+    .map(normalizeGraphNode)
+    .filter((node) => node.type === "document");
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const allEdges = (Array.isArray(rawGraph.edges) ? rawGraph.edges : [])
+    .map((edge) => ({
+      ...edge,
+      source: String(edge.source),
+      target: String(edge.target),
+      relation: String(edge.relation || "supplements"),
+    }))
+    .filter((edge) => (
+      nodeById.has(edge.source)
+      && nodeById.has(edge.target)
+      && RELATION_STYLES[edge.relation]
+    ));
+  const edges = selectCoreGraphEdges(allEdges, 6);
+
+  dom.graph.replaceChildren();
+  dom.graphMeta.textContent = edges.length < allEdges.length
+    ? `${nodes.length} 篇文献 · 展示 ${edges.length}/${allEdges.length} 条核心关系`
+    : `${nodes.length} 篇文献 · ${edges.length} 条核心关系`;
+  if (!edges.length) {
+    renderLaneGraph(rawGraph);
+    return;
+  }
+  dom.graphEmpty.hidden = true;
+
+  const viewWidth = 760;
+  const rowHeight = 92;
+  const topOffset = 30;
+  const nodeWidth = 216;
+  const nodeHeight = 62;
+  const leftX = 24;
+  const rightX = viewWidth - leftX - nodeWidth;
+  const viewHeight = Math.max(360, topOffset * 2 + edges.length * rowHeight);
+  dom.graph.setAttribute("viewBox", `0 0 ${viewWidth} ${viewHeight}`);
+  dom.graph.setAttribute("preserveAspectRatio", "xMinYMin meet");
+  dom.graph.style.minWidth = `${viewWidth}px`;
+  dom.graph.style.height = `${viewHeight}px`;
+
+  const connected = connectedNodeIds(state.selectedGraphNodeId, allEdges);
+  edges.forEach((edge, index) => {
+    const source = nodeById.get(edge.source);
+    const target = nodeById.get(edge.target);
+    const style = relationStyleFor(edge.relation);
+    const y = topOffset + index * rowHeight;
+    const centerY = y + nodeHeight / 2;
+    const row = svgElement("g", {
+      class: "relation-row",
+      "data-relation": edge.relation,
+    });
+    row.append(svgElement("line", {
+      x1: "12",
+      x2: String(viewWidth - 12),
+      y1: String(y + nodeHeight + 15),
+      y2: String(y + nodeHeight + 15),
+      class: "relation-row-divider",
+    }));
+    const path = svgElement("path", {
+      d: `M ${leftX + nodeWidth + 12} ${centerY} L ${rightX - 12} ${centerY}`,
+      class: "graph-edge chain-edge",
+      stroke: style.color,
+      "data-relation": edge.relation,
+      "data-source": edge.source,
+      "data-target": edge.target,
+    });
+    const isRelated = Boolean(
+      state.selectedGraphNodeId
+      && (edge.source === state.selectedGraphNodeId || edge.target === state.selectedGraphNodeId)
+    );
+    path.classList.add(isRelated ? "is-highlighted" : "is-hidden");
+    const pathTitle = svgElement("title");
+    pathTitle.textContent = `${style.label}：${edge.rationale || "文献间证据关系"}`;
+    path.append(pathTitle);
+    row.append(path);
+
+    const labelBackground = svgElement("rect", {
+      x: "337",
+      y: String(centerY - 13),
+      width: "86",
+      height: "26",
+      rx: "4",
+      class: "edge-label-background",
+      stroke: style.color,
+    });
+    labelBackground.classList.add(isRelated ? "is-highlighted" : "is-hidden");
+    row.append(labelBackground);
+    const label = svgElement("text", {
+      x: "380",
+      y: String(centerY + 4),
+      class: "edge-label chain-label",
+      fill: style.color,
+      "text-anchor": "middle",
+      "data-relation": edge.relation,
+    });
+    label.classList.add(isRelated ? "is-highlighted" : "is-hidden");
+    label.textContent = style.label;
+    row.append(label);
+    row.append(
+      relationChainNode(source, leftX, y, nodeWidth, nodeHeight, connected),
+      relationChainNode(target, rightX, y, nodeWidth, nodeHeight, connected),
+    );
+    dom.graph.append(row);
+  });
+}
+
+function selectCoreGraphEdges(edges, limit) {
+  const priority = {
+    updates: 0,
+    conflicts: 1,
+    cautions: 2,
+    supports: 3,
+    confirms: 4,
+    supplements: 5,
+  };
+  return [...edges]
+    .sort((left, right) => (
+      (priority[left.relation] ?? 99) - (priority[right.relation] ?? 99)
+      || left.source.localeCompare(right.source)
+      || left.target.localeCompare(right.target)
+    ))
+    .slice(0, limit);
+}
+
+function relationChainNode(node, x, y, width, height, connected) {
+  const style = typeStyle(node.evidenceType);
+  const group = svgElement("g", {
+    class: "graph-node chain-node",
+    role: "button",
+    tabindex: "0",
+    "aria-label": `${TYPE_LABELS[node.evidenceType] || "文献"}：${node.title}`,
+    "data-node-id": node.id,
+    "data-node-type": "document",
+  });
+  if (Number.isInteger(node.sourceNumber)) {
+    group.dataset.sourceNumber = String(node.sourceNumber);
+  }
+  if (node.id === state.selectedGraphNodeId) {
+    group.classList.add("is-selected");
+  } else if (state.selectedGraphNodeId && !connected.has(node.id)) {
+    group.classList.add("is-muted");
+  }
+  group.append(svgElement("rect", {
+    x: String(x),
+    y: String(y),
+    width: String(width),
+    height: String(height),
+    rx: "5",
+    fill: style.soft,
+    stroke: style.color,
+  }));
+  const typeText = svgElement("text", {
+    x: String(x + 10),
+    y: String(y + 17),
+    class: "node-type",
+    fill: style.color,
+  });
+  typeText.textContent = compactTypeLabel(node.evidenceType);
+  group.append(typeText);
+  const yearText = svgElement("text", {
+    x: String(x + width - 9),
+    y: String(y + 17),
+    class: "node-year",
+  });
+  yearText.textContent = node.year || "年份未知";
+  group.append(yearText);
+  const titleText = svgElement("text", {
+    x: String(x + 10),
+    y: String(y + 39),
+    class: "node-title",
+  });
+  splitTitle(node.title, 20, 2).forEach((line, index) => {
+    const tspan = svgElement("tspan", {
+      x: String(x + 10),
+      dy: index === 0 ? "0" : "14",
+    });
+    tspan.textContent = line;
+    titleText.append(tspan);
+  });
+  group.append(titleText);
+  const title = svgElement("title");
+  title.textContent = node.title;
+  group.append(title);
+
+  const activate = () => {
+    state.selectedGraphNodeId = node.id;
+    renderGraph();
+    if (Number.isInteger(node.sourceNumber)) selectSource(node.sourceNumber);
+  };
+  group.addEventListener("click", activate);
+  group.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      activate();
+    }
+  });
+  return group;
+}
+
+function renderLaneGraph(graph = state.graph) {
   const rawGraph = graph && typeof graph === "object" ? graph : { nodes: [], edges: [] };
   state.graph = rawGraph;
   const nodes = (Array.isArray(rawGraph.nodes) ? rawGraph.nodes : [])
@@ -792,6 +1139,11 @@ function renderGraph(graph = state.graph) {
       && visibleIds.has(edge.target)
       && RELATION_STYLES[edge.relation]
     ));
+  const activeEdges = state.selectedGraphNodeId
+    ? edges.filter((edge) => (
+      edge.source === state.selectedGraphNodeId || edge.target === state.selectedGraphNodeId
+    ))
+    : [];
 
   dom.graph.replaceChildren();
   dom.graphMeta.textContent = `${nodes.length} 篇文献 · ${edges.length} 条关系 · 按证据层级布局`;
@@ -806,41 +1158,35 @@ function renderGraph(graph = state.graph) {
   const evidenceTypes = TYPE_ORDER
     .concat(["unknown"])
     .filter((type) => nodes.some((node) => node.evidenceType === type));
-  const laneWidth = 176;
-  const nodeWidth = 134;
+  const laneWidth = 190;
+  const nodeWidth = 142;
   const nodeHeight = 78;
-  const laneGap = 42;
-  const topOffset = 92;
+  const laneGap = 46;
+  const rowGap = 48;
   const maxRows = Math.max(...evidenceTypes.map((type) => (
     nodes.filter((node) => node.evidenceType === type).length
   )));
-  const routeBands = Math.min(3, Math.max(1, Math.ceil(edges.length / 2)));
-  const contentBottom = topOffset + maxRows * (nodeHeight + 34);
+  const sameLaneEdgeIndexes = activeEdges
+    .map((edge, edgeIndex) => {
+      const source = nodes.find((node) => node.id === edge.source);
+      const target = nodes.find((node) => node.id === edge.target);
+      return source && target && source.evidenceType === target.evidenceType
+        ? edgeIndex
+        : null;
+    })
+    .filter((edgeIndex) => edgeIndex !== null);
+  const sameLaneRouteByEdge = new Map(sameLaneEdgeIndexes.map((edgeIndex, index) => [
+    edgeIndex,
+    { channel: index },
+  ]));
+  const topOffset = 74;
+  const contentBottom = topOffset + maxRows * nodeHeight + Math.max(0, maxRows - 1) * rowGap;
   const viewWidth = Math.max(760, evidenceTypes.length * laneWidth + laneGap * 2);
-  const viewHeight = Math.max(360, contentBottom + 48 + routeBands * 20);
+  const viewHeight = Math.max(360, contentBottom + 44);
   dom.graph.setAttribute("viewBox", `0 0 ${viewWidth} ${viewHeight}`);
   dom.graph.setAttribute("preserveAspectRatio", "xMinYMin meet");
   dom.graph.style.minWidth = `${viewWidth}px`;
   dom.graph.style.height = `${viewHeight}px`;
-
-  const defs = svgElement("defs");
-  Object.entries(RELATION_STYLES).forEach(([relation, style]) => {
-    const marker = svgElement("marker", {
-      id: `arrow-${relation}`,
-      viewBox: "0 0 8 8",
-      refX: "7",
-      refY: "4",
-      markerWidth: "6",
-      markerHeight: "6",
-      orient: "auto-start-reverse",
-    });
-    marker.append(svgElement("path", {
-      d: "M 0 0 L 8 4 L 0 8 z",
-      fill: style.color,
-    }));
-    defs.append(marker);
-  });
-  dom.graph.append(defs);
 
   const positions = new Map();
   evidenceTypes.forEach((evidenceType, laneIndex) => {
@@ -860,7 +1206,7 @@ function renderGraph(graph = state.graph) {
       .forEach((node, rowIndex) => {
         positions.set(node.id, {
           x,
-          y: topOffset + rowIndex * (nodeHeight + 34),
+          y: topOffset + rowIndex * (nodeHeight + rowGap),
           width: nodeWidth,
           height: nodeHeight,
           laneIndex,
@@ -869,51 +1215,112 @@ function renderGraph(graph = state.graph) {
   });
 
   const connected = connectedNodeIds(state.selectedGraphNodeId, edges);
-  let longEdgeIndex = 0;
-  edges.forEach((edge) => {
+  const edgePlans = activeEdges.map((edge, edgeIndex) => {
     const source = positions.get(edge.source);
     const target = positions.get(edge.target);
-    if (!source || !target) return;
-    const style = relationStyleFor(edge.relation);
-    const laneDistance = Math.abs(source.laneIndex - target.laneIndex);
-    const useOuterRoute = laneDistance !== 1 || Math.abs(source.y - target.y) > 1;
-    const routeIndex = useOuterRoute ? longEdgeIndex++ : 0;
-    const geometry = edgeGeometry(
+    if (!source || !target) return null;
+    const sameLane = source.laneIndex === target.laneIndex;
+    const movingLeft = source.laneIndex > target.laneIndex;
+    return {
+      edge,
+      edgeIndex,
       source,
       target,
-      routeIndex,
-      contentBottom,
-      useOuterRoute,
-    );
+      sourceSide: sameLane ? "right" : (movingLeft ? "left" : "right"),
+      targetSide: sameLane ? "right" : (movingLeft ? "right" : "left"),
+      outerRoute: sameLaneRouteByEdge.get(edgeIndex) || null,
+    };
+  }).filter(Boolean);
+  const endpointGroups = new Map();
+  edgePlans.forEach((plan) => {
+    [
+      { role: "source", nodeId: plan.edge.source, side: plan.sourceSide },
+      { role: "target", nodeId: plan.edge.target, side: plan.targetSide },
+    ].forEach((endpoint) => {
+      const key = `${endpoint.nodeId}:${endpoint.side}`;
+      if (!endpointGroups.has(key)) endpointGroups.set(key, []);
+      endpointGroups.get(key).push({ plan, role: endpoint.role });
+    });
+  });
+  endpointGroups.forEach((endpoints) => {
+    endpoints
+      .sort((left, right) => {
+        const leftOther = left.role === "source" ? left.plan.target : left.plan.source;
+        const rightOther = right.role === "source" ? right.plan.target : right.plan.source;
+        return leftOther.y - rightOther.y || left.plan.edgeIndex - right.plan.edgeIndex;
+      })
+      .forEach((endpoint, slot) => {
+        endpoint.plan[`${endpoint.role}Port`] = { slot, total: endpoints.length };
+      });
+  });
+
+  const labelLayer = svgElement("g", { class: "edge-label-layer" });
+  const reservedLabels = [];
+  edgePlans.forEach((plan) => {
+    const { edge, source, target } = plan;
+    const style = relationStyleFor(edge.relation);
+    const sourceY = graphPortY(source, plan.sourcePort);
+    const targetY = graphPortY(target, plan.targetPort);
+    const geometry = edgeGeometry(source, target, {
+      sourceSide: plan.sourceSide,
+      targetSide: plan.targetSide,
+      sourceY,
+      targetY,
+      sourceStemOffset: graphStemOffset(plan.sourcePort),
+      targetStemOffset: graphStemOffset(plan.targetPort),
+      route: plan.outerRoute,
+    });
     const path = svgElement("path", {
       d: geometry.path,
       class: "graph-edge",
       stroke: style.color,
-      "marker-end": `url(#arrow-${edge.relation})`,
       "data-relation": edge.relation,
       "data-source": edge.source,
       "data-target": edge.target,
     });
-    const isMuted = state.selectedGraphNodeId
-      && edge.source !== state.selectedGraphNodeId
-      && edge.target !== state.selectedGraphNodeId;
-    if (isMuted) path.classList.add("is-muted");
+    const isRelated = Boolean(
+      state.selectedGraphNodeId
+      && (edge.source === state.selectedGraphNodeId || edge.target === state.selectedGraphNodeId)
+    );
+    path.classList.add(isRelated ? "is-highlighted" : "is-hidden");
     const title = svgElement("title");
     title.textContent = `${style.label}：${edge.rationale || "文献间证据关系"}`;
     path.append(title);
     dom.graph.append(path);
 
+    const labelPosition = reserveGraphLabel(
+      geometry.labelX,
+      geometry.labelY,
+      style.label,
+      positions,
+      reservedLabels,
+      viewWidth,
+      viewHeight,
+    );
+    const labelGroup = svgElement("g", {
+      class: "edge-label-group",
+      "data-relation": edge.relation,
+    });
+    labelGroup.classList.add(isRelated ? "is-highlighted" : "is-hidden");
+    labelGroup.append(svgElement("rect", {
+      x: String(labelPosition.x - labelPosition.width / 2),
+      y: String(labelPosition.y - 12),
+      width: String(labelPosition.width),
+      height: "18",
+      rx: "3",
+      class: "edge-label-bg",
+      stroke: style.color,
+    }));
     const label = svgElement("text", {
-      x: String(geometry.labelX),
-      y: String(geometry.labelY),
+      x: String(labelPosition.x),
+      y: String(labelPosition.y + 1),
       class: "edge-label",
-      fill: style.color,
       "text-anchor": "middle",
       "data-relation": edge.relation,
     });
-    if (isMuted) label.classList.add("is-muted");
     label.textContent = style.label;
-    dom.graph.append(label);
+    labelGroup.append(label);
+    labelLayer.append(labelGroup);
   });
 
   nodes.forEach((node) => {
@@ -924,6 +1331,7 @@ function renderGraph(graph = state.graph) {
       class: "graph-node",
       role: "button",
       tabindex: "0",
+      "aria-pressed": node.id === state.selectedGraphNodeId ? "true" : "false",
       "aria-label": `${TYPE_LABELS[node.evidenceType] || "文献"}：${node.title}`,
       "data-node-id": node.id,
       "data-node-type": "document",
@@ -982,9 +1390,10 @@ function renderGraph(graph = state.graph) {
     group.append(title);
 
     const activate = () => {
-      state.selectedGraphNodeId = node.id;
+      const deselecting = state.selectedGraphNodeId === node.id;
+      state.selectedGraphNodeId = deselecting ? null : node.id;
       renderGraph();
-      if (Number.isInteger(node.sourceNumber)) selectSource(node.sourceNumber);
+      if (!deselecting && Number.isInteger(node.sourceNumber)) selectSource(node.sourceNumber);
     };
     group.addEventListener("click", activate);
     group.addEventListener("keydown", (event) => {
@@ -995,6 +1404,7 @@ function renderGraph(graph = state.graph) {
     });
     dom.graph.append(group);
   });
+  dom.graph.append(labelLayer);
 }
 
 function normalizeGraphNode(node) {
@@ -1038,42 +1448,80 @@ function connectedNodeIds(selectedId, edges) {
   return connected;
 }
 
-function edgeGeometry(source, target, routeIndex, contentBottom, useOuterRoute) {
+function initialCurvedPath(x1, y1, x2, y2) {
+  const direction = x2 >= x1 ? 1 : -1;
+  const bend = Math.max(34, Math.abs(x2 - x1) * 0.42) * direction;
+  return `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`;
+}
+
+function graphPortY(position, port = { slot: 0, total: 1 }) {
+  const usableHeight = position.height - 30;
+  return position.y + 19 + usableHeight * ((port.slot + 1) / (port.total + 1));
+}
+
+function graphStemOffset(port = { slot: 0, total: 1 }) {
+  return 10 + 26 * ((port.slot + 1) / (port.total + 1));
+}
+
+function edgeGeometry(source, target, options) {
+  const {
+    sourceSide,
+    targetSide,
+    sourceY,
+    targetY,
+    sourceStemOffset,
+    targetStemOffset,
+    route,
+  } = options;
+  const x1 = sourceSide === "left" ? source.x : source.x + source.width;
+  const x2 = targetSide === "left" ? target.x : target.x + target.width;
   const sameLane = source.laneIndex === target.laneIndex;
-  const movingLeft = source.x > target.x;
-  const x1 = sameLane
-    ? source.x + source.width
-    : (movingLeft ? source.x : source.x + source.width);
-  const x2 = sameLane
-    ? target.x + target.width
-    : (movingLeft ? target.x + target.width : target.x);
-  const y1 = source.y + source.height / 2;
-  const y2 = target.y + target.height / 2;
-  const direction = sameLane ? 1 : (movingLeft ? -1 : 1);
-  if (!useOuterRoute) {
-    const bend = Math.max(34, Math.abs(x2 - x1) * 0.42);
+  if (!sameLane) {
+    const direction = x2 >= x1 ? 1 : -1;
+    const bend = Math.min(110, Math.max(34, Math.abs(x2 - x1) * 0.34));
     return {
-      path: `M ${x1} ${y1} C ${x1 + direction * bend} ${y1}, ${x2 - direction * bend} ${y2}, ${x2} ${y2}`,
+      path: `M ${x1} ${sourceY} C ${x1 + direction * bend} ${sourceY}, ${x2 - direction * bend} ${targetY}, ${x2} ${targetY}`,
       labelX: (x1 + x2) / 2,
-      labelY: (y1 + y2) / 2 - 7,
+      labelY: (sourceY + targetY) / 2 - 9,
     };
   }
-  const upperRoute = routeIndex % 2 === 0;
-  const channel = Math.floor(routeIndex / 2) % 3;
-  const routeY = upperRoute ? 58 - channel * 18 : contentBottom + 24 + channel * 18;
-  const sourceGapX = x1 + 20 * direction;
-  const targetGapX = sameLane ? sourceGapX : x2 - 20 * direction;
-  const path = [
-    `M ${x1} ${y1}`,
-    `C ${sourceGapX} ${y1}, ${sourceGapX} ${routeY}, ${sourceGapX} ${routeY}`,
-    `L ${targetGapX} ${routeY}`,
-    `C ${targetGapX} ${routeY}, ${targetGapX} ${y2}, ${x2} ${y2}`,
-  ].join(" ");
+  const sourceDirection = sourceSide === "left" ? -1 : 1;
+  const channel = route?.channel || 0;
+  const loopOffset = Math.max(sourceStemOffset, targetStemOffset) + channel * 8;
+  const loopX = x1 + loopOffset * sourceDirection;
   return {
-    path,
-    labelX: (x1 + x2) / 2,
-    labelY: routeY - 6,
+    path: `M ${x1} ${sourceY} C ${loopX} ${sourceY}, ${loopX} ${targetY}, ${x2} ${targetY}`,
+    labelX: loopX,
+    labelY: (sourceY + targetY) / 2 - 7,
   };
+}
+
+function reserveGraphLabel(candidateX, candidateY, text, positions, reserved, viewWidth, viewHeight) {
+  const width = Math.max(34, String(text || "").length * 10 + 12);
+  const height = 18;
+  const offsets = [0, -20, 20, -40, 40, -60, 60];
+  const nodeBoxes = Array.from(positions.values());
+  const overlaps = (box, other, padding = 0) => !(
+    box.x + box.width + padding <= other.x
+    || other.x + other.width + padding <= box.x
+    || box.y + box.height + padding <= other.y
+    || other.y + other.height + padding <= box.y
+  );
+  for (const yOffset of offsets) {
+    for (const xOffset of offsets) {
+      const x = Math.min(viewWidth - width / 2 - 4, Math.max(width / 2 + 4, candidateX + xOffset));
+      const y = Math.min(viewHeight - 8, Math.max(18, candidateY + yOffset));
+      const box = { x: x - width / 2, y: y - 12, width, height };
+      if (nodeBoxes.some((node) => overlaps(box, node, 6))) continue;
+      if (reserved.some((label) => overlaps(box, label, 5))) continue;
+      reserved.push(box);
+      return { x, y, width };
+    }
+  }
+  const fallbackY = Math.min(viewHeight - 8, Math.max(18, candidateY + reserved.length * 20));
+  const fallback = { x: candidateX - width / 2, y: fallbackY - 12, width, height };
+  reserved.push(fallback);
+  return { x: candidateX, y: fallbackY, width };
 }
 
 function splitTitle(value, maxCharacters, maxLines) {
@@ -1104,16 +1552,14 @@ function svgElement(name, attributes = {}) {
 }
 
 async function continueEmbedding() {
-  const probeCompleted = Boolean(state.kbStatus?.embedding_probe_completed);
   const pending = Number(state.kbStatus?.embedding_pending || 0);
-  if (!probeCompleted) {
-    if (!window.confirm("先调用嵌入模型试运行最多 32 条文本，是否确认？")) return;
-    await startBuild({ confirmEmbeddingCost: true, embeddingLimit: 32 });
-    return;
-  }
-  const countLabel = pending > 0 ? `剩余约 ${pending.toLocaleString("zh-CN")} 条文本，` : "";
-  if (!window.confirm(`${countLabel}将执行完整向量化，是否再次确认？`)) return;
-  await startBuild({ confirmEmbeddingCost: true, confirmFullEmbeddingCost: true });
+  const countLabel = pending > 0 ? `约 ${pending.toLocaleString("zh-CN")} 条文本` : "待处理文本";
+  showToast(`已开始在本机向量化${countLabel}。`);
+  await startBuild({
+    confirmEmbeddingCost: true,
+    confirmFullEmbeddingCost: true,
+    stage: "embedding",
+  });
 }
 
 async function startBuild({
@@ -1136,7 +1582,7 @@ async function startBuild({
       body: JSON.stringify(payload),
     });
     beginJobPolling(job);
-    showToast(confirmEmbeddingCost ? "已提交向量化任务。" : "已开始免费本地构建阶段。");
+    showToast(confirmEmbeddingCost ? "已提交本地向量化任务。" : "已开始本地构建阶段。");
   } catch (error) {
     setJobControls(false);
     showToast(error.message);
@@ -1161,15 +1607,9 @@ async function retryBuild() {
   const stage = dom.retryStage.value;
   const paidStage = stage === "embedding" || stage === "vector";
   if (paidStage) {
-    const probeCompleted = Boolean(state.kbStatus?.embedding_probe_completed);
-    const message = probeCompleted
-      ? "该重试将继续完整向量化，是否再次确认？"
-      : "该重试先试运行最多 32 条嵌入，是否确认？";
-    if (!window.confirm(message)) return;
     await startBuild({
       confirmEmbeddingCost: true,
-      confirmFullEmbeddingCost: probeCompleted,
-      embeddingLimit: probeCompleted ? null : 32,
+      confirmFullEmbeddingCost: true,
       stage,
     });
     return;
@@ -1218,7 +1658,13 @@ async function pollJob() {
 function renderJob(job) {
   const progress = job.progress || {};
   const stage = progress.stage || progress.current_stage || "";
-  dom.jobStage.textContent = stage ? STAGE_LABELS[stage] || stage : jobStateLabel(job.state);
+  const embedding = progress.stage_counters?.embedding || {};
+  const processed = Number(embedding.processed || 0);
+  const total = Number(progress.total_embedding_count || 0);
+  const stageLabel = stage ? STAGE_LABELS[stage] || stage : jobStateLabel(job.state);
+  dom.jobStage.textContent = stage === "embedding" && total > 0
+    ? `${stageLabel} ${processed.toLocaleString("zh-CN")} / ${total.toLocaleString("zh-CN")}`
+    : stageLabel;
   dom.jobState.textContent = jobStateLabel(job.state);
   const terminal = ["paused", "completed", "completed_with_errors", "embedding_pending", "failed"].includes(job.state);
   if (terminal) {
@@ -1230,7 +1676,11 @@ function renderJob(job) {
       dom.jobProgress.value = 0;
     }
   } else {
-    dom.jobProgress.removeAttribute("value");
+    if (stage === "embedding" && total > 0) {
+      dom.jobProgress.value = Math.min(100, Math.max(0, (processed / total) * 100));
+    } else {
+      dom.jobProgress.removeAttribute("value");
+    }
   }
   dom.pauseKb.disabled = !["queued", "running", "pausing"].includes(job.state);
 }

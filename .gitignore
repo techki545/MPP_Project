@@ -12,6 +12,10 @@ node_modules/
 .vscode/
 .worktrees/
 .superpowers/
+.pytest_cache/
+.test-temp*/
+.test-tmp/
+.push-*-temp/
 **/record/
 .local/
 *.sqlite3

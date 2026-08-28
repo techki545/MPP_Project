@@ -59,6 +59,7 @@ def build_document_graph(
                 "evidence_type": source.evidence_type,
                 "year": source.year,
                 "quality": source.quality,
+                "population_applicability": source.population_applicability,
             },
         }
         for source in selected_sources

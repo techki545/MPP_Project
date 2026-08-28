@@ -16,6 +16,7 @@ from .report_structure import (
     FIRST_DEMO_STAGES,
     compose_deterministic_report,
 )
+from .text_cleaning import clean_evidence_text, reference_like_text
 
 
 _EVIDENCE_TYPES = {
@@ -85,6 +86,7 @@ _REPORT_HEADING_LABELS = frozenset(
         "conclusion",
         "循证回答",
         "综合回答",
+        "综合文献结论",
         "推荐意见",
         "结论",
         "证据链",
@@ -94,27 +96,79 @@ _REPORT_HEADING_LABELS = frozenset(
     }
 )
 _MODEL_REPORT_PROMPT = """
-You are a clinical evidence synthesis engine. Return one JSON object with exactly
-analysis_steps and final_answer_markdown. analysis_steps must contain exactly six
-items in this stage_key order: inventory, guidelines, systematic_reviews,
-randomized_trials, lower_level_evidence, synthesis. Use the supplied Chinese title
-for each stage. Explicitly state when an evidence level is absent. Follow the
-evidence pyramid, then use chronology to decide whether newer lower-level evidence
-updates, confirms, supplements, conflicts with, or cautions higher-level evidence.
+You are a clinical literature synthesis assistant. Answer the user's actual
+question by integrating the conclusions of multiple relevant sources instead of
+mechanically restating retrieved snippets. First classify the question's actual
+intent and scope (for example: yes/no recommendation, treatment options, dose,
+duration, treatment timing, diagnosis, examination, prognosis, safety, cause,
+mechanism, or prevention). Then identify consensus, conflicts,
+chronological updates, and evidence gaps across studies. Then use clinical
+reasoning to explain what that combined literature means for the question. The
+literature supplies the factual findings; your role is comparison, synthesis,
+and clearly labelled interpretation. Answer the identified intent directly. Do
+not substitute an adjacent question merely because retrieved evidence is richer
+for it. If a question asks for overall treatment duration while sources report
+only component-specific regimens, state that no single overall duration can be
+inferred, separate durations by intervention, and identify missing dimensions.
+Never equate one drug's course with the entire treatment course.
 
-The final answer must start with "## 综合回答", immediately give a conclusion, and
-then contain these headings in order: "### 证据链", "### 时间更新",
-"### 安全性与适用边界", and "### 证据缺口". Cite only the numbered sources
-supplied as [N]. Never invent a study, number, dose, effect size, confidence
-interval, source, or citation. Any quantitative value must appear in a cited
-source snippet. Put citations immediately after every substantive sentence and
-reuse a validated graph claim statement verbatim for each clinical assertion.
-Do not translate or paraphrase those claim statements. This is evidence support,
-not a substitute for an individual clinician's judgment.
+Return one JSON object with exactly analysis_steps and final_answer_markdown.
+analysis_steps must contain exactly six items in this stage_key order: inventory,
+guidelines, systematic_reviews, randomized_trials, lower_level_evidence,
+synthesis. Use the supplied Chinese title for each stage. These steps are an
+auditable evidence workflow, not private chain-of-thought. Explicitly state when
+an evidence level is absent. Follow the evidence pyramid, then use chronology to
+decide whether newer lower-level evidence updates, confirms, supplements,
+conflicts with, or cautions higher-level evidence.
+
+The final answer must start with "## 综合回答", immediately give a useful,
+question-specific paragraph beginning with "**综合文献结论：", and then contain
+these headings in order:
+"### 证据链", "### 时间更新", "### 安全性与适用边界", and "### 证据缺口".
+You may paraphrase, synthesize across sources, and add clearly framed clinical
+interpretation. Cite numbered sources as [N] when stating what a retrieved source
+found or recommended. General clinical reasoning and transparent inferences may
+be uncited, but must not be presented as a result of a specific study. Never
+invent a study, number, dose, effect size, confidence interval, source, or
+citation. Every quantitative value must appear in a cited source snippet. Make
+clear where evidence ends and synthesis begins. This is decision support, not a
+substitute for an individual clinician's judgment.
+
+Each source includes population_applicability. Treat direct as evidence for the
+question's target condition, indirect_rmpp or indirect_smpp as extrapolated
+evidence, general_mpp as general background, and unclear as uncertain. Never hide
+an extrapolation: state it near the conclusion and reduce certainty when the main
+evidence is indirect.
+
+Write one cross-source synthesis, not a list of isolated paper summaries or an
+extractive collage. State the dominant conclusion, then name meaningful
+exceptions or conflicts and explain whether newer evidence changes older
+guidance. Never paste bibliography entries,
+journal reference strings, garbled column text, or long verbatim passages. The
+only valid citation syntax is [N], where N is a supplied source_number; bracketed
+numbers that may have appeared inside an article are not system citations. Keep
+the conclusion focused and group the evidence chain by evidence level.
+
+When the evidence bundle contains enough relevant claims, make the report
+substantive rather than terse: aim for about 1200-2000 Chinese characters in
+final_answer_markdown. This is a depth target, not permission to invent or pad.
+Use two or three paragraphs for the conclusion and explain the recommendation,
+its rationale, certainty, and decision boundary. In the evidence chain, compare
+the strongest two to four sources across levels instead of merely naming them.
+Explain whether their populations, interventions, outcomes, and directions are
+consistent. Give chronology its own interpretation, not only a year range.
+Describe concrete safety concerns, applicable patients, exceptions, and at least
+three evidence gaps when supported by the bundle. Each analysis_steps body should
+normally contain 2-4 complete, source-grounded sentences. Avoid repetition, but
+do not compress a multi-source clinical question into a few bullet fragments.
 """.strip()
 _CLAIM_EXTRACTION_PROMPT = """
 Extract only source-grounded clinical claims from the numbered evidence snippets.
 Return JSON with a claims array containing at most one claim per supplied source.
+Omit a source when its quote options discuss the same disease but do not directly
+address the intervention, comparison, outcome, or clinical focus in the user's
+question. Prefer a result, conclusion, or recommendation sentence over background
+mechanism, introduction, bibliography, or methods text.
 Every claim must include source_number, source_chunk_ids, source_quote_id,
 clinical_aspect, direction, evidence_role, population, intervention, comparator,
 design, sample_size, dose, outcome, effect_measures, safety_signal, limitations,
@@ -127,7 +181,9 @@ source_chunk_ids. Do not return or rewrite the quote text; the server resolves i
 ID. effect_measures and limitations must always be JSON arrays of strings; use []
 when absent. For population, intervention, comparator, design, sample_size, dose,
 outcome, and follow_up, copy an exact phrase from the selected quote or use an empty
-string when it is not reported. Do not infer missing numbers or details.
+string when it is not reported. Do not infer missing numbers or details. Classify
+treatment duration, course length, treatment cycles, and stopping or reassessment
+time points as timing, not dose.
 """.strip()
 _REFINEMENT_PROMPT = """
 Classify one title/abstract into exactly one allowed evidence type: guideline,
@@ -154,6 +210,9 @@ class EvidenceSource:
     quality: str = "unknown"
     journal: str = ""
     doi: str = ""
+    population_applicability: str = "not_assessed"
+    population_applicability_score: float = 0.5
+    question_relevance_score: float = 0.5
 
     def __post_init__(self) -> None:
         if (
@@ -184,6 +243,9 @@ class EvidenceSource:
             "quality": self.quality,
             "journal": self.journal,
             "doi": self.doi,
+            "population_applicability": self.population_applicability,
+            "population_applicability_score": self.population_applicability_score,
+            "question_relevance_score": self.question_relevance_score,
         }
 
 
@@ -218,15 +280,87 @@ class ValidatedClaims:
         }
 
 
-def extractive_fallback_claims(
-    sources: Sequence[EvidenceSource], *, limit: int = 8
+_QUESTION_FOCUS_CONCEPTS = (
+    ("exercise", (r"运动", r"锻炼", r"康复训练", r"体力活动", r"exercise", r"physical\s+activity")),
+    ("steroid", (r"糖皮质激素", r"甲泼尼龙", r"甲强龙", r"地塞米松", r"glucocorticoid", r"corticosteroid", r"methylprednisolone")),
+    ("azithromycin", (r"阿奇霉素", r"azithromycin")),
+    ("macrolide", (r"大环内酯", r"macrolide")),
+    ("tetracycline", (r"四环素", r"多西环素", r"米诺环素", r"tetracycline", r"doxycycline", r"minocycline")),
+    ("fluoroquinolone", (r"氟喹诺酮", r"左氧氟沙星", r"莫西沙星", r"fluoroquinolone", r"levofloxacin", r"moxifloxacin")),
+    ("bronchoscopy", (r"支气管镜", r"肺泡灌洗", r"bronchoscop", r"bronchoalveolar\s+lavage")),
+    ("ivig", (r"静脉注射免疫球蛋白", r"丙种球蛋白", r"\bivig\b", r"immunoglobulin")),
+    ("thrombosis", (r"血栓", r"肺栓塞", r"thrombo", r"pulmonary\s+embol")),
+)
+
+
+def filter_claims_for_question(
+    question: str, validated: ValidatedClaims
 ) -> ValidatedClaims:
-    """Create traceable, direction-neutral claims without semantic inference."""
+    """Discard claims that do not mention every intervention focus in the question."""
+
+    focus_groups = [
+        (name, patterns)
+        for name, patterns in _QUESTION_FOCUS_CONCEPTS
+        if any(re.search(pattern, question, re.I) for pattern in patterns)
+    ]
+    if not focus_groups:
+        return validated
+
+    kept: list[EvidenceClaim] = []
+    audit = list(validated.audit)
+    for claim in validated.claims:
+        claim_text = " ".join(
+            value
+            for value in (
+                claim.population,
+                claim.intervention,
+                claim.comparator,
+                claim.outcome,
+                claim.statement,
+                claim.source_quote,
+                claim.dose,
+            )
+            if value
+        )
+        missing = [
+            name
+            for name, patterns in focus_groups
+            if not any(re.search(pattern, claim_text, re.I) for pattern in patterns)
+        ]
+        if missing:
+            audit.append(
+                {
+                    "claim_id": claim.claim_id,
+                    "document_id": claim.document_id,
+                    "reason": "claim_question_focus_mismatch",
+                    "missing_focus": missing,
+                }
+            )
+            continue
+        kept.append(claim)
+    return ValidatedClaims(tuple(kept), tuple(audit))
+
+
+def extractive_fallback_claims(
+    sources: Sequence[EvidenceSource], *, question: str = "", limit: int = 15
+) -> ValidatedClaims:
+    """Create concise, traceable claims when model extraction is unavailable."""
     claims: list[EvidenceClaim] = []
     audit: list[dict[str, Any]] = []
     for source in sources[: max(0, limit)]:
-        quote = next((text.strip() for text in source.snippets if text.strip()), "")
-        if not quote or not source.chunk_ids:
+        quote = _best_fallback_excerpt(
+            (*source.snippets, source.abstract),
+            question=question,
+            title=source.title,
+        )
+        grounding_ids = ()
+        if quote:
+            grounding_ids = (
+                (source.document_id,)
+                if _normalized_text_key(quote) in _normalized_text_key(source.abstract)
+                else source.chunk_ids
+            )
+        if not quote or not grounding_ids:
             audit.append(
                 {
                     "source_number": source.source_number,
@@ -234,6 +368,23 @@ def extractive_fallback_claims(
                 }
             )
             continue
+        # The intervention is often stated in the paper title while the selected
+        # result sentence only says "different doses" or "the intervention".
+        intervention = _fallback_intervention(f"{source.title} {quote}")
+        dose = _fallback_dose(quote)
+        clinical_aspect = _fallback_clinical_aspect(quote)
+        direction = _fallback_direction(quote)
+        safety_signal = bool(
+            re.search(r"不良反应|安全性|感染风险|副作用|高血压|高血糖", quote, re.I)
+        )
+        evidence_role = (
+            "boundary"
+            if safety_signal
+            else "core"
+            if source.evidence_type
+            in {"guideline", "systematic_review", "randomized_controlled_trial"}
+            else "supplement"
+        )
         claims.append(
             EvidenceClaim(
                 claim_id=f"fallback-{source.source_number}",
@@ -241,18 +392,323 @@ def extractive_fallback_claims(
                 evidence_type=source.evidence_type,
                 year=source.year,
                 population="",
-                intervention="",
+                intervention=intervention,
                 comparator="",
-                outcome="相关证据发现",
-                direction="uncertain",
-                statement=_grounded_excerpt(quote),
-                source_chunk_ids=source.chunk_ids,
+                outcome=_fallback_outcome(quote),
+                direction=direction,
+                statement=_fallback_statement(quote, intervention, dose),
+                source_chunk_ids=grounding_ids,
                 design=source.evidence_type,
-                limitations=("模型不可用时的提取式回退，未判断效应方向。",),
+                dose=dose,
+                limitations=("模型不可用时由原文完整句提取，需结合全文复核。",),
                 source_quote=quote,
+                clinical_aspect=clinical_aspect,
+                evidence_role=evidence_role,
+                safety_signal=safety_signal,
             )
         )
     return ValidatedClaims(tuple(claims), tuple(audit))
+
+
+_FALLBACK_MEDICATIONS = (
+    ("甲泼尼龙", r"甲泼尼龙|甲强龙|methylprednisolone"),
+    ("地塞米松", r"地塞米松|dexamethasone"),
+    ("阿奇霉素", r"阿奇霉素|azithromycin"),
+    ("红霉素", r"红霉素|erythromycin"),
+    ("多西环素", r"多西环素|doxycycline"),
+    ("米诺环素", r"米诺环素|minocycline"),
+    ("静脉注射免疫球蛋白（IVIG）", r"丙种球蛋白|免疫球蛋白|ivig|gammaglobulin"),
+    ("糖皮质激素", r"糖皮质激素|皮质类固醇|glucocorticoid|corticosteroid"),
+)
+_FALLBACK_DOSE_PATTERN = re.compile(
+    r"\d+(?:\.\d+)?(?:\s*[~～\-–至]\s*\d+(?:\.\d+)?)?\s*"
+    r"(?:mg|g)\s*/?\s*(?:\(\s*kg\s*[·./]\s*d\s*\)|kg\s*(?:[·./]\s*(?:d|day))?)",
+    re.I,
+)
+_FALLBACK_SENTENCE_SPLIT = re.compile(
+    r"(?<=[。！？!?])\s*|(?<=\.)\s+|"
+    r"(?<=\.)(?=(?:目的|方法|结果|结论)\s*[:：]?)"
+)
+
+
+def _normalized_text_key(text: str) -> str:
+    return re.sub(r"\W+", "", str(text or "").casefold())
+
+
+def _best_fallback_excerpt(
+    snippets: Sequence[str], *, question: str = "", title: str = ""
+) -> str:
+    candidates: list[tuple[int, int, str]] = []
+    descriptive_candidates: list[tuple[int, int, str]] = []
+    question_terms = {
+        token
+        for token in re.findall(r"[\u4e00-\u9fff]{2,}|[a-z]{3,}", question.casefold())
+        if token not in {"儿童", "肺炎", "什么", "怎么", "应该"}
+    }
+    focus_groups = [
+        patterns
+        for _, patterns in _QUESTION_FOCUS_CONCEPTS
+        if any(re.search(pattern, question, re.I) for pattern in patterns)
+    ]
+    duration_question = bool(
+        re.search(
+            r"疗程|治疗周期|治疗多久|多长时间|需要多久|持续多久|"
+            r"course of treatment|treatment duration|how long",
+            question,
+            re.I,
+        )
+    )
+    duration_pattern = re.compile(
+        r"疗程|周期|连续|连用|持续|间隔|停药|减量|"
+        r"(?:\d+|[一二三四五六七八九十]+)\s*(?:天|周|月|d)|"
+        r"48\s*[-~～]\s*72\s*h",
+        re.I,
+    )
+    intent_pattern: re.Pattern[str] | None = None
+    if re.search(r"诊断|确诊|鉴别|如何识别|检查|检测|diagnos", question, re.I):
+        intent_pattern = re.compile(
+            r"诊断标准|符合.{0,12}标准|确诊|鉴别|病原学|核酸检测|抗体|"
+            r"影像学|敏感度|特异度|临界值|cutoff|diagnos",
+            re.I,
+        )
+    elif re.search(r"不良反应|副作用|安全性|风险是什么|adverse|safety|harm", question, re.I):
+        intent_pattern = re.compile(
+            r"不良反应|副作用|安全性|风险|禁忌|慎用|过敏|心律失常|"
+            r"QT|肝功能|胃肠道|恶心|呕吐|腹泻|adverse|safety",
+            re.I,
+        )
+    elif re.search(r"病因|原因|为什么|如何发展|机制|etiolog|cause|mechanism", question, re.I):
+        intent_pattern = re.compile(
+            r"危险因素|风险因素|独立因素|相关因素|发病机制|机制|由于|导致|"
+            r"与.{0,18}相关|预测|OR\s*=|risk factor|mechanism",
+            re.I,
+        )
+    elif re.search(r"预后|复发|长期结局|危险因素|风险因素|prognos|follow-up", question, re.I):
+        intent_pattern = re.compile(
+            r"预后|复发|长期结局|危险因素|风险因素|独立因素|相关因素|"
+            r"随访|后遗症|支气管扩张|闭塞性细支气管炎|prognos|follow-up",
+            re.I,
+        )
+    for snippet in snippets:
+        raw_text = str(snippet or "").replace("\r\n", "\n").replace("\r", "\n")
+        # PDF extraction commonly inserts blank lines at every visual line. Join
+        # those layout breaks before sentence splitting so evidence stays whole.
+        raw_text = re.sub(r"\s*\n+\s*", " ", raw_text)
+        for raw_clause in _FALLBACK_SENTENCE_SPLIT.split(raw_text):
+            author_list = re.search(
+                r"[\u4e00-\u9fff]{2,4}[,，][\u4e00-\u9fff]{2,4}[,，]"
+                r"[\u4e00-\u9fff]{2,4}(?:[,，]等|等)",
+                raw_clause,
+            )
+            if author_list and author_list.start() >= 18:
+                raw_clause = raw_clause[: author_list.start()]
+            clause = clean_evidence_text(raw_clause, limit=220)
+            if len(clause) < 18 or reference_like_text(raw_clause):
+                continue
+            if focus_groups and any(
+                not any(
+                    re.search(pattern, f"{title} {clause}", re.I)
+                    for pattern in patterns
+                )
+                for patterns in focus_groups
+            ):
+                continue
+            duration_markers = duration_pattern.findall(clause)
+            if duration_question and not duration_markers:
+                continue
+            intent_markers = intent_pattern.findall(clause) if intent_pattern else []
+            if intent_pattern is not None and not intent_markers:
+                continue
+            if re.search(
+                r"^(?:尼龙|霉素)\s*治疗|[、,，]\s*[\u4e00-\u9fff]{2,4}\.?$",
+                clause,
+            ):
+                continue
+            if re.search(
+                r"参考文献|\bet\s*al\b|doi\s*:|CHINA\s+MODERN|\bVol\.|"
+                r"第\s*\d+\s*卷\s*第\s*\d+\s*期|"
+                r"有效性\s+(?:IL-?\d+|CRP|TNF)|总结(?:研究)?结果|结果.*报道如下",
+                clause,
+                re.I,
+            ):
+                continue
+            digit_ratio = sum(character.isdigit() for character in clause) / len(clause)
+            if digit_ratio > 0.2:
+                continue
+            direction_markers = re.findall(
+                r"推荐|建议|可考虑|有效|显著|良好|获益|改善|缩短|"
+                r"降低|高于|低于|短于|优于|提高|未增加|差异有统计学意义|"
+                r"差异无统计学意义|首选|不推荐|无效|风险因素|危险因素|预测|"
+                r"相当|更高|更低|增加|减少|更多|较少",
+                clause,
+                re.I,
+            )
+            result_markers = re.findall(r"结论|结果|综上|提示|显示", clause, re.I)
+            method_markers = re.findall(
+                r"目的|纳入标准|入选标准|排除标准|一般资料|研究对象|随机数字表|"
+                r"分为(?:对照|观察|治疗)组|方法选取|观察指标|疗效判定|"
+                r"判定(?:为|治疗效果)|知情同意|伦理委员会",
+                clause,
+                re.I,
+            )
+            if re.search(
+                r"排除标准|纳入标准|入选标准|随机数字表|观察指标|疗效判定|"
+                r"判定治疗效果|知情同意|伦理委员会",
+                clause,
+                re.I,
+            ):
+                continue
+            if re.search(r"^(?:目的|研究目的)\s*[:：]?", clause):
+                continue
+            if method_markers and not direction_markers:
+                continue
+            if (
+                not direction_markers
+                and not _FALLBACK_DOSE_PATTERN.search(clause)
+                and not duration_markers
+            ):
+                descriptive_score = sum(
+                    3 for term in question_terms if term in clause.casefold()
+                )
+                descriptive_score += 12 * len(intent_markers)
+                descriptive_candidates.append(
+                    (descriptive_score, -len(clause), clause)
+                )
+                continue
+            if re.search(r"(?:与|和|及|为|在|对|使用|治疗|联合|比较)$", clause):
+                continue
+            score = 0
+            score += sum(3 for term in question_terms if term in clause.casefold())
+            score += 7 * len(direction_markers)
+            score += 3 * len(result_markers)
+            score += 12 * len(duration_markers) if duration_question else 0
+            score += 12 * len(intent_markers)
+            score += 3 * len(
+                re.findall(
+                    r"联合|治疗|不良反应|安全|剂量|疗程|mg\s*/?\s*kg",
+                    clause,
+                    re.I,
+                )
+            )
+            score -= 12 * len(method_markers)
+            score -= 5 * len(re.findall(r"表\s*\d|图\s*\d|t\s*值|P\s*值", clause, re.I))
+            if 35 <= len(clause) <= 170:
+                score += 3
+            candidates.append((score, -len(clause), clause))
+    if not candidates:
+        if not descriptive_candidates:
+            return ""
+        descriptive_candidates.sort(reverse=True)
+        return descriptive_candidates[0][2]
+    candidates.sort(reverse=True)
+    return candidates[0][2]
+
+
+def _fallback_intervention(text: str) -> str:
+    names = [
+        label
+        for label, pattern in _FALLBACK_MEDICATIONS
+        if re.search(pattern, text, re.I)
+    ]
+    if "甲泼尼龙" in names or "地塞米松" in names:
+        names = [name for name in names if name != "糖皮质激素"]
+    return "、".join(dict.fromkeys(names))
+
+
+def _fallback_dose(text: str) -> str:
+    match = _FALLBACK_DOSE_PATTERN.search(text)
+    return " ".join(match.group(0).split()) if match else ""
+
+
+def _fallback_clinical_aspect(text: str) -> str:
+    if re.search(r"不良反应|安全性|感染风险|副作用|高血压|高血糖", text, re.I):
+        return "safety"
+    if re.search(
+        r"疗程|治疗周期|持续.{0,8}(?:天|周|月|d)|连用.{0,8}(?:天|周|d)|"
+        r"病程.{0,8}(?:天|周|d)|间隔.{0,8}(?:天|周|d)|总疗程|时机|早期|晚期",
+        text,
+        re.I,
+    ):
+        return "timing"
+    if _FALLBACK_DOSE_PATTERN.search(text) or re.search(r"剂量|小剂量|大剂量", text):
+        return "dose"
+    if re.search(
+        r"诊断标准|确诊|鉴别诊断|病原学|核酸检测|抗体检测|敏感度|特异度|临界值",
+        text,
+        re.I,
+    ):
+        return "diagnosis"
+    if re.search(
+        r"预后|复发|长期结局|危险因素|风险因素|独立因素|随访|后遗症|"
+        r"支气管扩张|闭塞性细支气管炎",
+        text,
+        re.I,
+    ):
+        return "prognosis"
+    if re.search(r"病因|发病机制|机制|由于|导致|相关因素", text, re.I):
+        return "other"
+    if re.search(r"适用|指征|危重|重症|难治性", text):
+        return "applicability"
+    return "effectiveness"
+
+
+def _fallback_direction(text: str) -> str:
+    ineffective = re.search(
+        r"(\d+(?:\.\d+)?)\s*%[^，,。；;%]{0,45}(?:治疗)?无效", text
+    )
+    effective = re.search(
+        r"(\d+(?:\.\d+)?)\s*%[^，,。；;%]{0,45}(?:治疗)?(?<!无)有效", text
+    )
+    if ineffective and effective:
+        ineffective_rate = float(ineffective.group(1))
+        effective_rate = float(effective.group(1))
+        if effective_rate > ineffective_rate:
+            return "supports"
+        if ineffective_rate > effective_rate:
+            return "opposes"
+    if re.search(r"不推荐|不支持|(?:治疗|方案)无效|未见改善", text):
+        return "opposes"
+    if re.search(r"尚无|无定论|不明确|差异无统计学意义|未能检索", text):
+        return "uncertain"
+    if re.search(r"推荐|建议|有效|改善|缩短|降低|优于|提高|可考虑", text):
+        return "supports"
+    return "uncertain"
+
+
+def _fallback_outcome(text: str) -> str:
+    outcomes = []
+    patterns = (
+        ("退热时间", r"退热|热程|发热"),
+        ("咳嗽等症状", r"咳嗽|临床症状"),
+        ("住院时间", r"住院"),
+        ("肺部炎症或影像学改善", r"肺部|炎症|影像|CRP"),
+        ("不良反应", r"不良反应|安全"),
+    )
+    for label, pattern in patterns:
+        if re.search(pattern, text, re.I):
+            outcomes.append(label)
+    return "、".join(outcomes[:3]) or "临床疗效"
+
+
+def _fallback_statement(text: str, intervention: str, dose: str) -> str:
+    """Prefer a compact structured sentence over a damaged PDF line."""
+    if intervention and dose:
+        route = next(
+            (
+                label
+                for label, pattern in (
+                    ("静脉滴注", r"静脉滴注|静滴|intravenous"),
+                    ("口服", r"口服|oral"),
+                    ("雾化吸入", r"雾化|吸入|inhal"),
+                )
+                if re.search(pattern, text, re.I)
+            ),
+            "",
+        )
+        route_text = f"，给药途径为{route}" if route else ""
+        return f"该来源报告{intervention}剂量为{dose}{route_text}。"
+    excerpt = _grounded_excerpt(text, limit=170)
+    return re.sub(r"^(?:结论|结果)\s*[:：]?\s*", "", excerpt).strip()
 
 
 @dataclass(frozen=True)
@@ -394,7 +850,7 @@ class GroundedClaimExtractor:
             for value in (source.title, source.abstract, *source.snippets)
             if value.strip()
         )
-        if source_quote.casefold() not in source_text.casefold():
+        if not quote_id and source_quote.casefold() not in source_text.casefold():
             return None, "source_quote_not_found"
         if quote_id:
             cutoff = raw_claim.get("evidence_cutoff_year")
@@ -574,10 +1030,17 @@ class GroundedReporter:
                         for stage_key, title in FIRST_DEMO_STAGES
                     ],
                     "final_answer_markdown": (
-                        "## 综合回答\n\n**结论：...**[N]\n\n"
+                        "## 综合回答\n\n**综合文献结论：...**[N]\n\n"
                         "### 证据链\n...\n\n### 时间更新\n...\n\n"
                         "### 安全性与适用边界\n...\n\n### 证据缺口\n..."
                     ),
+                    "detail_requirements": {
+                        "target_length": "1200-2000 Chinese characters when supported",
+                        "analysis_step_depth": "2-4 complete sentences per step",
+                        "conclusion": "direct answer, rationale, certainty, decision boundary",
+                        "evidence_chain": "compare 2-4 strongest sources across levels",
+                        "safety_and_gaps": "concrete boundaries and at least 3 supported gaps",
+                    },
                 },
             },
         )
@@ -609,11 +1072,13 @@ class GroundedReporter:
                 if error.code != "ungrounded_model_response":
                     raise
                 sources = {item.source_number: item for item in bundle.sources}
+                envelope_valid = True
                 try:
                     analysis_steps, raw_final = self._validate_response_envelope(
                         response, bundle
                     )
                 except KnowledgeBaseError:
+                    envelope_valid = False
                     if not isinstance(response, Mapping):
                         raise
                     raw_final = response.get("final_answer_markdown")
@@ -622,9 +1087,29 @@ class GroundedReporter:
                     analysis_steps = self._deterministic_fallback(
                         question, bundle, "ungrounded_model_response"
                     ).analysis_steps
-                final_answer = _canonicalize_report_claims(
-                    raw_final, bundle, sources
-                )
+                if envelope_valid:
+                    try:
+                        final_answer = _validate_flexible_synthesis(
+                            raw_final, sources, require_readability=True
+                        )
+                    except KnowledgeBaseError as flexible_error:
+                        if flexible_error.code != "ungrounded_model_response":
+                            raise
+                        final_answer = _canonicalize_report_claims(
+                            raw_final, bundle, sources
+                        )
+                        _validate_report_readability(final_answer)
+                else:
+                    try:
+                        final_answer = _canonicalize_report_claims(
+                            raw_final, bundle, sources
+                        )
+                    except KnowledgeBaseError as canonical_error:
+                        if canonical_error.code != "ungrounded_model_response":
+                            raise
+                        final_answer = _validate_flexible_synthesis(
+                            raw_final, sources
+                        )
             return self._build_report(analysis_steps, final_answer, bundle)
         except KnowledgeBaseError as error:
             code = error.code
@@ -763,33 +1248,111 @@ def _bundle_for_model(bundle: EvidenceBundle) -> dict[str, Any]:
     model_sources = tuple(bundle.sources[:_MODEL_SOURCE_LIMIT])
     allowed_documents = {source.document_id for source in model_sources}
     return {
-        "sources": _sources_for_model(model_sources),
+        "sources": [_report_source_metadata(source) for source in model_sources],
         "graph": dict(bundle.graph),
         "claims": [
-            claim.as_dict()
+            _clean_claim_for_model(claim.as_dict())
             for claim in bundle.claims
             if claim.document_id in allowed_documents
         ],
     }
 
 
+def _clean_claim_for_model(payload: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(payload)
+    for key in (
+        "statement",
+        "source_quote",
+        "population",
+        "intervention",
+        "comparator",
+        "outcome",
+        "dose",
+        "design",
+        "follow_up",
+    ):
+        if key in cleaned:
+            cleaned[key] = clean_evidence_text(cleaned[key], limit=420)
+    for key in ("effect_measures", "limitations"):
+        value = cleaned.get(key)
+        if isinstance(value, list):
+            cleaned[key] = [
+                item
+                for item in (clean_evidence_text(text, limit=200) for text in value)
+                if item
+            ]
+    return cleaned
+
+
+def _report_source_metadata(source: EvidenceSource) -> dict[str, Any]:
+    """Keep the synthesis request to bibliographic metadata and validated claims."""
+    return {
+        "source_number": source.source_number,
+        "document_id": source.document_id,
+        "title": source.title,
+        "evidence_type": source.evidence_type,
+        "year": source.year,
+        "quality": source.quality,
+        "journal": source.journal,
+        "doi": source.doi,
+        "population_applicability": source.population_applicability,
+        "question_relevance_score": source.question_relevance_score,
+    }
+
+
 def _quote_options(source: EvidenceSource) -> list[dict[str, str]]:
-    options: list[dict[str, str]] = []
+    candidates: list[tuple[int, str, str]] = []
+    seen: set[str] = set()
     for chunk_id, snippet in zip(source.chunk_ids, source.snippets):
         for clause in _grounding_clauses(snippet):
-            text = " ".join(clause.split())
-            if len(text) < 16:
+            text = clean_evidence_text(clause, limit=360)
+            key = re.sub(r"\W+", "", text.casefold())
+            if (
+                len(text) < 16
+                or reference_like_text(clause)
+                or not key
+                or key in seen
+            ):
                 continue
-            options.append(
-                {
-                    "quote_id": f"quote-{source.source_number}-{len(options) + 1}",
-                    "source_chunk_id": chunk_id,
-                    "text": text[:360].rstrip(),
-                }
-            )
-            if len(options) == 4:
-                return options
-    return options
+            seen.add(key)
+            candidates.append((_quote_quality_score(text), chunk_id, text))
+    candidates.sort(key=lambda item: (item[0], -len(item[2])), reverse=True)
+    return [
+        {
+            "quote_id": f"quote-{source.source_number}-{index}",
+            "source_chunk_id": chunk_id,
+            "text": text,
+        }
+        for index, (_, chunk_id, text) in enumerate(candidates[:4], start=1)
+    ]
+
+
+def _quote_quality_score(text: str) -> int:
+    score = 0
+    score += 5 * len(
+        re.findall(
+            r"结论|推荐|建议|结果|可考虑|联合|小剂量|常规剂量|疗程|剂量|"
+            r"有效|改善|缩短|降低|安全性|不良反应|mg\s*/\s*kg",
+            text,
+            re.I,
+        )
+    )
+    score += 3 if re.search(r"甲泼尼龙|糖皮质激素|阿奇霉素", text, re.I) else 0
+    score += 2 if text.rstrip().endswith(("。", ".", "！", "?", "？")) else 0
+    score -= 8 * len(
+        re.findall(
+            r"t\s*值|P\s*值|表\s*\d|图\s*\d|病迁延|观目前|察其|对研泼|"
+            r"\b(?:vol|doi)\b",
+            text,
+            re.I,
+        )
+    )
+    digit_ratio = sum(character.isdigit() for character in text) / max(len(text), 1)
+    if digit_ratio > 0.2:
+        score -= 10
+    if len(text) > 260:
+        score -= 3
+    return score
 
 
 def _basis_is_grounded(basis: str, title: str, abstract: str) -> bool:
@@ -863,8 +1426,6 @@ def _validate_report_claims(
                 raise _ungrounded()
             saw_claim = True
             cursor = match.end()
-        if _clean_report_segment(line[cursor:]):
-            raise _ungrounded()
     if not saw_claim:
         raise _ungrounded()
 
@@ -879,6 +1440,7 @@ def _canonicalize_report_claims(
     cited_ids = _citation_ids(text)
     if not cited_ids or not cited_ids.issubset(sources):
         raise _ungrounded()
+    _validate_statistics(text, cited_ids, sources)
     output_lines: list[str] = []
     saw_claim = False
     for raw_line in text.splitlines():
@@ -890,7 +1452,8 @@ def _canonicalize_report_claims(
         line_parts: list[str] = []
         matches = list(_CITATION_GROUP_PATTERN.finditer(line))
         if not matches:
-            raise _ungrounded()
+            output_lines.append(raw_line)
+            continue
         for match in matches:
             raw_segment = line[cursor : match.start()]
             segment = _clean_report_segment(raw_segment)
@@ -921,12 +1484,66 @@ def _canonicalize_report_claims(
                 line_parts.append(" ".join(replacements))
             saw_claim = True
             cursor = match.end()
-        if _clean_report_segment(line[cursor:]):
-            raise _ungrounded()
-        output_lines.append("".join(line_parts))
+        trailing = line[cursor:]
+        output_lines.append("".join(line_parts) + trailing)
     if not saw_claim:
         raise _ungrounded()
     return "\n".join(output_lines)
+
+
+def _validate_flexible_synthesis(
+    text: str,
+    sources: dict[int, EvidenceSource],
+    *,
+    require_readability: bool = False,
+) -> str:
+    """Accept model synthesis while enforcing real citations and source-backed numbers."""
+
+    final_answer = text.strip()
+    required_headings = (
+        "## 综合回答",
+        "### 证据链",
+        "### 时间更新",
+        "### 安全性与适用边界",
+        "### 证据缺口",
+    )
+    positions = [final_answer.find(heading) for heading in required_headings]
+    if (
+        not final_answer.startswith(required_headings[0])
+        or any(position < 0 for position in positions)
+        or positions != sorted(positions)
+    ):
+        raise _ungrounded()
+    cited_ids = _citation_ids(final_answer)
+    if not cited_ids or not cited_ids.issubset(sources):
+        raise _ungrounded()
+    _validate_statistics(final_answer, cited_ids, sources)
+    if require_readability:
+        _validate_report_readability(final_answer)
+    return final_answer
+
+
+def _validate_report_readability(text: str) -> None:
+    """Reject extractive-looking model reports before they reach the UI."""
+
+    if re.search(
+        r"参考文献|(?:硕士|博士)(?:研究生)?学位论文|当代医药论丛|"
+        r"[\[［【]\s*[JM]\s*[\]］】]",
+        text,
+        re.I,
+    ):
+        raise _ungrounded()
+    content_lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if any(len(line) > 420 for line in content_lines):
+        raise _ungrounded()
+    conclusion_end = text.find("### 证据链")
+    introduction = text[:conclusion_end] if conclusion_end >= 0 else text[:500]
+    if not re.search(r"结论|推荐|建议|不推荐|证据不足", introduction[:260]):
+        raise _ungrounded()
 
 
 def _graph_claims_by_document(
@@ -980,7 +1597,28 @@ def _report_segment_is_grounded(
     source_quote = _optional_text(claim.get("source_quote"))
     if _unicase(segment) == _unicase(statement).strip(" .;:"):
         return True
-    return _claim_statement_is_grounded(segment, source_quote)
+    if _claim_statement_is_grounded(segment, source_quote):
+        return True
+    if _has_negation(segment) != _has_negation(source_quote):
+        return False
+    segment_tokens = _semantic_tokens(segment)
+    source_tokens = _semantic_tokens(f"{statement} {source_quote}")
+    overlap = segment_tokens.intersection(source_tokens)
+    return len(overlap) >= 2 and len(overlap) / max(1, len(segment_tokens)) >= 0.45
+
+
+def _semantic_tokens(text: str) -> set[str]:
+    normalized = _unicase(text)
+    tokens = {
+        token
+        for token in re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", normalized)
+        if len(token) >= 2 and token not in _GROUNDING_STOPWORDS
+    }
+    chinese_runs = re.findall(r"[\u4e00-\u9fff]+", normalized)
+    for run in chinese_runs:
+        tokens.discard(run)
+        tokens.update(run[index : index + 2] for index in range(len(run) - 1))
+    return tokens
 
 
 def _validate_statistics(

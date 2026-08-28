@@ -131,6 +131,7 @@ def test_cli_confirming_embeddings_requires_model_configuration(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MPP_KB_SOURCE", str(source))
     monkeypatch.setenv("MPP_KB_DATA", str(tmp_path / "data"))
+    monkeypatch.setenv("MPP_EMBEDDING_PROVIDER", "remote")
     monkeypatch.delenv("MPP_API_KEY", raising=False)
     monkeypatch.delenv("MPP_API_BASE", raising=False)
 
@@ -149,6 +150,28 @@ def test_cli_confirming_embeddings_requires_model_configuration(
     assert error["code"] == "embedding_config_missing"
 
 
+def test_cli_retry_uses_existing_metadata_when_source_has_only_pdfs(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    source = tmp_path / "corpus"
+    _write_tiny_corpus(source)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MPP_KB_SOURCE", str(source))
+    monkeypatch.setenv("MPP_KB_DATA", str(tmp_path / "data"))
+    monkeypatch.delenv("MPP_API_KEY", raising=False)
+    monkeypatch.delenv("MPP_API_BASE", raising=False)
+
+    assert main(["build", "--json"]) == 0
+    capsys.readouterr()
+    (source / "metadata.csv").unlink()
+
+    assert main(["retry", "--stage", "parse", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["final_state"] == "embedding_pending"
+    assert payload["stage_counters"]["parse"]["failed"] == 0
+
+
 def test_cli_rejects_unbounded_first_embedding_confirmation(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -157,6 +180,7 @@ def test_cli_rejects_unbounded_first_embedding_confirmation(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MPP_KB_SOURCE", str(source))
     monkeypatch.setenv("MPP_KB_DATA", str(tmp_path / "data"))
+    monkeypatch.setenv("MPP_EMBEDDING_PROVIDER", "remote")
 
     exit_code = main(["build", "--confirm-embedding-cost", "--json"])
     error = json.loads(capsys.readouterr().err)

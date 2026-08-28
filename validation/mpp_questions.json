@@ -1,6 +1,7 @@
 [
   {
     "id": "steroid-use",
+    "expected_question_type": "treatment",
     "question": "重症肺炎支原体肺炎儿童是否应在抗菌治疗基础上联合使用糖皮质激素？",
     "filters": {"year_from": 2010, "year_to": 2026, "fulltext_only": false},
     "expected_evidence_types": ["guideline", "systematic_review", "randomized_controlled_trial"],
@@ -9,6 +10,7 @@
   },
   {
     "id": "steroid-dose",
+    "expected_question_type": "treatment",
     "question": "SMPP儿童使用甲泼尼龙时，低剂量和高剂量方案应如何选择？",
     "filters": {"year_from": 2010, "year_to": 2026, "fulltext_only": false},
     "expected_evidence_types": ["systematic_review", "randomized_controlled_trial"],
@@ -17,6 +19,7 @@
   },
   {
     "id": "steroid-timing",
+    "expected_question_type": "treatment",
     "question": "儿童肺炎支原体肺炎在什么时间开始糖皮质激素治疗更合适？",
     "filters": {"year_from": 2010, "year_to": 2026, "fulltext_only": false},
     "expected_evidence_types": ["randomized_controlled_trial", "observational_study"],
@@ -25,6 +28,7 @@
   },
   {
     "id": "macrolide-resistance",
+    "expected_question_type": "treatment",
     "question": "儿童大环内酯耐药肺炎支原体肺炎应如何识别并调整治疗？",
     "filters": {"year_from": 2010, "year_to": 2026, "fulltext_only": false},
     "expected_evidence_types": ["guideline", "systematic_review", "observational_study"],
@@ -33,6 +37,7 @@
   },
   {
     "id": "tetracyclines",
+    "expected_question_type": "treatment",
     "question": "大环内酯无反应或耐药的MPP儿童何时可考虑多西环素或米诺环素？",
     "filters": {"year_from": 2010, "year_to": 2026, "fulltext_only": false},
     "expected_evidence_types": ["guideline", "observational_study"],
@@ -41,6 +46,7 @@
   },
   {
     "id": "fluoroquinolones",
+    "expected_question_type": "treatment",
     "question": "儿童难治性MPP在什么情况下可考虑左氧氟沙星，其获益和风险是什么？",
     "filters": {"year_from": 2010, "year_to": 2026, "fulltext_only": false},
     "expected_evidence_types": ["guideline", "observational_study"],
@@ -49,6 +55,7 @@
   },
   {
     "id": "bronchoscopy",
+    "expected_question_type": "treatment",
     "question": "重症或难治性MPP儿童何时需要支气管镜肺泡灌洗？",
     "filters": {"year_from": 2010, "year_to": 2026, "fulltext_only": false},
     "expected_evidence_types": ["systematic_review", "observational_study"],
@@ -57,6 +64,7 @@
   },
   {
     "id": "ivig",
+    "expected_question_type": "treatment",
     "question": "SMPP儿童是否应常规联合静脉注射免疫球蛋白治疗？",
     "filters": {"year_from": 2010, "year_to": 2026, "fulltext_only": false},
     "expected_evidence_types": ["systematic_review", "randomized_controlled_trial", "observational_study"],
@@ -65,6 +73,7 @@
   },
   {
     "id": "thromboembolism-anticoagulation",
+    "expected_question_type": "treatment",
     "question": "MPP儿童合并肺栓塞或心腔血栓时，抗凝或溶栓治疗应如何决策？",
     "filters": {"year_from": 2000, "year_to": 2026, "fulltext_only": false},
     "expected_evidence_types": ["guideline", "case_report", "observational_study"],
@@ -73,6 +82,7 @@
   },
   {
     "id": "refractory-disease",
+    "expected_question_type": "diagnosis",
     "question": "儿童难治性肺炎支原体肺炎如何早期识别，并排除哪些并发症？",
     "filters": {"year_from": 2010, "year_to": 2026, "fulltext_only": false},
     "expected_evidence_types": ["guideline", "systematic_review", "observational_study"],
@@ -81,6 +91,7 @@
   },
   {
     "id": "severe-disease",
+    "expected_question_type": "treatment",
     "question": "儿童肺炎支原体肺炎达到重症标准后，治疗路径与监测重点是什么？",
     "filters": {"year_from": 2010, "year_to": 2026, "fulltext_only": false},
     "expected_evidence_types": ["guideline", "systematic_review", "observational_study"],
@@ -89,6 +100,7 @@
   },
   {
     "id": "long-term-pulmonary-outcomes",
+    "expected_question_type": "prognosis",
     "question": "SMPP儿童出院后应如何随访闭塞性细支气管炎、支气管扩张等长期肺部结局？",
     "filters": {"year_from": 2010, "year_to": 2026, "fulltext_only": false},
     "expected_evidence_types": ["systematic_review", "observational_study"],

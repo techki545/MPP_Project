@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 import json
 import socket
+import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -24,14 +25,16 @@ class ChatClient:
         api_key: str,
         model: str,
         *,
-        timeout: float = 60.0,
+        timeout: float = 120.0,
         transport: Transport | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self._endpoint = self._normalize_endpoint(base_url)
         self._api_key = str(api_key).strip()
         self.model = str(model).strip()
         self._timeout = float(timeout)
         self._transport = transport or self._default_transport
+        self._sleep = sleep or time.sleep
         self._terminal_error: tuple[str, str] | None = None
         if not self._api_key or not self.model or self._timeout <= 0:
             raise KnowledgeBaseError(
@@ -55,7 +58,7 @@ class ChatClient:
         payload = {
             "model": self.model,
             "temperature": 0.1,
-            "max_tokens": 4096,
+            "max_tokens": 6144,
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system_content},
@@ -70,13 +73,13 @@ class ChatClient:
         if self.model.casefold().startswith("deepseek-v4"):
             payload["thinking"] = {"type": "disabled"}
         try:
-            response = self._request(payload)
+            response = self._request_with_retry(payload)
         except HTTPError as error:
             if error.code == 400 and self._explicitly_rejects_response_format(error):
                 fallback_payload = dict(payload)
                 fallback_payload.pop("response_format", None)
                 try:
-                    response = self._request(fallback_payload)
+                    response = self._request_with_retry(fallback_payload)
                 except (HTTPError, URLError, TimeoutError, socket.timeout, OSError) as retry_error:
                     self._raise_transport_error(retry_error)
             else:
@@ -85,6 +88,23 @@ class ChatClient:
             self._raise_transport_error(error)
 
         return self._parse_response(response)
+
+    def _request_with_retry(self, payload: dict[str, Any]) -> Mapping[str, Any]:
+        delays = (1.0, 2.0, 4.0)
+        for attempt in range(len(delays) + 1):
+            try:
+                return self._request(payload)
+            except HTTPError as error:
+                retryable = error.code in (409, 429) or 500 <= error.code <= 599
+                if not retryable or attempt == len(delays):
+                    raise
+            except (URLError, TimeoutError, socket.timeout, OSError) as error:
+                if self._is_timeout_error(error):
+                    raise
+                if attempt == len(delays):
+                    raise
+            self._sleep(delays[attempt])
+        raise AssertionError("chat retry loop exhausted unexpectedly")
 
     def _request(self, payload: dict[str, Any]) -> Mapping[str, Any]:
         return self._transport(
@@ -153,7 +173,13 @@ class ChatClient:
         else:
             code = "chat_unavailable"
             message = "Chat service is temporarily unavailable"
-        self._terminal_error = (code, message)
+        if code in {
+            "chat_auth_failed",
+            "chat_model_not_found",
+            "chat_request_rejected",
+            "chat_timeout",
+        }:
+            self._terminal_error = (code, message)
         raise KnowledgeBaseError(code, message) from None
 
     @staticmethod

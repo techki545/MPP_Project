@@ -98,3 +98,35 @@ def test_validation_marks_an_uncited_answer_as_unsupported() -> None:
     assert assessment.citation_count == 0
     assert assessment.unsupported_citation_count == 1
     assert assessment.all_citations_supported is False
+
+
+def test_validation_scores_question_understanding_and_page_locators() -> None:
+    assessment = evaluate_case(
+        {
+            "id": "typed-treatment",
+            "question": "重症支原体肺炎儿童要吃什么药？",
+            "expected_question_type": "treatment",
+            "expected_title_terms": ["guideline"],
+        },
+        {
+            "mode": "hybrid",
+            "query_context": {
+                "question_type": "treatment",
+                "pico": {"population": ["儿童"], "intervention": [], "comparator": [], "outcome": []},
+            },
+            "sources": [
+                {
+                    "source_number": 1,
+                    "document_id": "doc-1",
+                    "title": "Treatment guideline",
+                    "snippets": ["Grounded evidence."],
+                    "page_ranges": ["3-4"],
+                }
+            ],
+            "answer_markdown": "结论。[1]",
+        },
+    )
+
+    assert assessment.query_understanding_present is True
+    assert assessment.question_type_match is True
+    assert assessment.citation_locator_coverage == 1.0

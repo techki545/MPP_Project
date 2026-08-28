@@ -96,6 +96,16 @@ class FakeWorkbenchService:
                 "update_count": 1,
                 "conflict_count": 0,
             },
+            "query_context": {
+                "question_type": "treatment",
+                "pico": {
+                    "population": ["SMPP", "儿童"],
+                    "intervention": ["糖皮质激素"],
+                    "comparator": ["高剂量"],
+                    "outcome": ["安全性"],
+                },
+                "subquestions": [],
+            },
             "sources": [
                 {
                     "source_number": 1,
@@ -284,9 +294,9 @@ def test_model_service_controls_are_accessible_and_key_starts_masked() -> None:
                 const question = document.querySelector('.question-row');
                 const filters = document.querySelector('.query-options');
                 return Boolean(
-                    question.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING
+                    question.compareDocumentPosition(filters) & Node.DOCUMENT_POSITION_FOLLOWING
                 ) && Boolean(
-                    section.compareDocumentPosition(filters) & Node.DOCUMENT_POSITION_FOLLOWING
+                    filters.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING
                 );
             }"""
         )
@@ -316,7 +326,7 @@ def test_complete_browser_model_config_is_trimmed_sent_and_key_can_be_revealed()
         assert toggle.get_attribute("aria-pressed") == "true"
 
         page.get_by_role("button", name="开始循证分析").click()
-        page.get_by_text("分析完成，共返回 1 项来源。").wait_for()
+        page.locator("#query-status").filter(has_text="1").wait_for()
 
         assert service.query_call_count == 1
         assert service.last_query_payload["model_config"] == {
@@ -324,6 +334,9 @@ def test_complete_browser_model_config_is_trimmed_sent_and_key_can_be_revealed()
             "api_key": "test-secret-value",
             "model_name": "private-chat-model",
         }
+        assert page.locator("#report-model").text_content() == "模型：test-model"
+        assert page.locator("#grounding-status").text_content() == "模型综合已采用"
+        assert page.locator("#grounding-status").get_attribute("data-state") == "ready"
         browser.close()
 
 
@@ -579,16 +592,23 @@ def test_workbench_renders_grounded_sources_and_omits_empty_model_config() -> No
         page.get_by_text("34,074").wait_for()
         page.get_by_label("临床问题").fill("SMPP儿童是否应常规使用糖皮质激素？")
         page.get_by_role("button", name="开始循证分析").click()
-        page.get_by_text("第二部分：综合循证回答").wait_for()
+        page.get_by_text("第二部分：综合文献结论").wait_for()
         page.get_by_text("推荐优先采用低剂量方案").wait_for()
+        page.get_by_text("治疗问题", exact=True).wait_for()
         assert service.query_call_count == 1
         assert "model_config" not in service.last_query_payload
         assert page.locator("[data-source-number='1']").count() >= 1
-        assert page.locator("#evidence-graph [data-node-id]").count() == 4
+        assert page.locator("#evidence-graph [data-node-id]").evaluate_all(
+            "elements => new Set(elements.map(element => element.dataset.nodeId)).size"
+        ) == 4
 
         page.locator("[data-source-number='1']").first.click()
         page.get_by_text("本次查询命中片段").wait_for()
         page.get_by_text("Low dose result").wait_for()
+        page.get_by_role("link", name="PDF · 第 3 页 ↗").wait_for()
+        assert page.get_by_role("link", name="PDF · 第 3 页 ↗").get_attribute("href").endswith(
+            "/api/documents/doc-1/pdf#page=3"
+        )
         assert page.get_by_text("Introduction text that was not hit by this query").count() == 0
         assert page.get_by_role("link", name="在浏览器中查看 PDF").is_visible()
         assert page.locator(".evidence-workspace").evaluate(
@@ -622,28 +642,35 @@ def test_first_demo_document_graph_renders_and_links_to_sources() -> None:
         page.get_by_text("推荐优先采用低剂量方案").wait_for()
 
         graph = page.locator("#evidence-graph")
-        assert graph.locator("[data-node-type='document']").count() == 4
-        assert graph.locator(".graph-edge").count() == 4
-        assert graph.locator(".edge-label").count() == 4
+        assert graph.locator("[data-node-type='document']").evaluate_all(
+            "elements => new Set(elements.map(element => element.dataset.nodeId)).size"
+        ) == 4
+        assert graph.locator(".graph-edge").count() == 0
+        assert graph.locator(".edge-label").count() == 0
         assert graph.locator(".lane-title").get_by_text("指南", exact=True).is_visible()
         assert graph.locator(".lane-title").get_by_text(
             "随机对照试验（RCT）", exact=True
         ).is_visible()
-        assert graph.get_by_text("支持", exact=True).is_visible()
-        assert graph.get_by_text("更新", exact=True).is_visible()
-        assert graph.get_by_text("确认", exact=True).is_visible()
-        assert graph.get_by_text("警示", exact=True).is_visible()
+        assert page.locator(".relation-legend").get_by_text("支持", exact=True).is_visible()
+        assert page.locator(".relation-legend").get_by_text("更新", exact=True).is_visible()
+        assert page.locator(".relation-legend").get_by_text("确认", exact=True).is_visible()
+        assert page.locator(".relation-legend").get_by_text("警示", exact=True).is_visible()
+        assert graph.locator(".graph-edge.is-highlighted").count() == 0
+        assert graph.locator(".edge-label-group.is-highlighted").count() == 0
 
-        graph.locator("[data-source-number='1']").click()
+        graph.locator("[data-source-number='1']").first.click()
         page.get_by_text("本次查询命中片段").wait_for()
-        assert graph.locator(".graph-node.is-selected").count() == 1
+        assert graph.locator(".graph-node.is-selected").evaluate_all(
+            "elements => new Set(elements.map(element => element.dataset.nodeId)).size"
+        ) == 1
         assert graph.locator(".graph-node.is-muted").count() >= 1
-        assert all(
-            opacity > 0
-            for opacity in graph.locator(".graph-edge").evaluate_all(
-                "elements => elements.map(element => Number(getComputedStyle(element).opacity))"
-            )
-        )
+        assert graph.locator(".graph-edge.is-highlighted").count() == 2
+        assert graph.locator(".graph-edge.is-hidden").count() == 0
+        assert graph.locator(".edge-label-group.is-highlighted").count() == 2
+
+        graph.locator("[data-source-number='1']").first.click()
+        assert graph.locator(".graph-node.is-selected").count() == 0
+        assert graph.locator(".graph-edge.is-highlighted").count() == 0
         browser.close()
 
 
@@ -674,7 +701,7 @@ def test_document_graph_scrolls_inside_mobile_frame_without_page_overflow() -> N
         browser.close()
 
 
-def test_graph_edges_do_not_cross_unrelated_document_nodes() -> None:
+def test_graph_edges_use_clean_bezier_lines_without_arrowheads() -> None:
     def node(identifier: str, evidence_type: str, number: int, title: str) -> dict:
         return {
             "node_id": identifier,
@@ -716,34 +743,47 @@ def test_graph_edges_do_not_cross_unrelated_document_nodes() -> None:
         page.get_by_role("button", name="开始循证分析").click()
         page.get_by_text("推荐优先采用低剂量方案").wait_for()
 
-        collisions = page.locator("#evidence-graph").evaluate(
-            """svg => {
-              const nodes = [...svg.querySelectorAll('.graph-node')].map(group => ({
-                id: group.dataset.nodeId,
-                rect: group.querySelector('rect').getBBox(),
-              }));
-              const collisions = [];
-              for (const path of svg.querySelectorAll('.graph-edge')) {
-                const length = path.getTotalLength();
-                for (let distance = 0; distance <= length; distance += 3) {
-                  const point = path.getPointAtLength(distance);
-                  const hit = nodes.find(node => {
-                    if (node.id === path.dataset.source || node.id === path.dataset.target) return false;
-                    const rect = node.rect;
-                    return point.x >= rect.x && point.x <= rect.x + rect.width
-                      && point.y >= rect.y && point.y <= rect.y + rect.height;
-                  });
-                  if (hit) {
-                    collisions.push([path.dataset.source, path.dataset.target, hit.id]);
-                    break;
-                  }
-                }
-              }
-              return collisions;
+        relation_paths = []
+        for node_id in ("guide-b", "review-b", "case-a", "review-c"):
+            page.locator(f"#evidence-graph [data-node-id='{node_id}']").click()
+            relation_paths.extend(page.locator("#evidence-graph .graph-edge").evaluate_all(
+                """paths => paths.map(path => ({
+                  d: path.getAttribute('d'),
+                  marker: path.getAttribute('marker-end'),
+                }))"""
+            ))
+            page.locator(f"#evidence-graph [data-node-id='{node_id}']").click()
+
+        assert len(relation_paths) == 4
+        assert all(
+            path["d"].startswith("M ") and " C " in path["d"]
+            for path in relation_paths
+        )
+        assert all(path["marker"] is None for path in relation_paths)
+        overlap_metrics = page.locator("#evidence-graph").evaluate(
+            """graph => {
+              const labels = [...graph.querySelectorAll('.edge-label-bg')];
+              const nodes = [...graph.querySelectorAll('.graph-node rect')];
+              const overlaps = (left, right) => !(
+                left.right <= right.left || right.right <= left.left
+                || left.bottom <= right.top || right.bottom <= left.top
+              );
+              const labelNode = labels.reduce(
+                (count, label) => count + nodes.filter(
+                  node => overlaps(label.getBoundingClientRect(), node.getBoundingClientRect())
+                ).length,
+                0,
+              );
+              const labelLabel = labels.reduce(
+                (count, label, index) => count + labels.slice(index + 1).filter(
+                  other => overlaps(label.getBoundingClientRect(), other.getBoundingClientRect())
+                ).length,
+                0,
+              );
+              return { labelNode, labelLabel };
             }"""
         )
-
-        assert collisions == []
+        assert overlap_metrics == {"labelNode": 0, "labelLabel": 0}
         browser.close()
 
 
@@ -766,11 +806,15 @@ def test_graph_edges_do_not_cross_unrelated_document_nodes() -> None:
         ("chat_unavailable", "模型服务暂时不可用，请稍后重试。"),
         (
             "chat_response_invalid",
-            "模型响应格式无法解析，已使用确定性回退结果。",
+            "模型响应格式无法解析，已使用本地证据综合。",
+        ),
+        (
+            "ungrounded_model_response",
+            "模型回答未通过引用校验，已使用本地证据综合。",
         ),
         (
             "model_config_missing",
-            "未配置模型，已使用确定性回退结果。",
+            "未配置模型，已使用本地证据综合。",
         ),
     ],
 )
@@ -807,9 +851,9 @@ def test_model_fallback_guidance_is_secret_safe_and_report_still_renders(
         assert "已保留确定性回退结果。" in status_text
         assert expected_guidance in status_text
         assert "  " not in status_text
-        assert page.locator("#report-model").text_content() == "确定性回退"
-        assert page.locator("#grounding-status").text_content() == "模型结果未采用"
-        assert page.locator("#grounding-status").get_attribute("data-state") == "warning"
+        assert page.locator("#report-model").text_content() == "本地证据综合"
+        assert page.locator("#grounding-status").text_content() == "引用已校验"
+        assert page.locator("#grounding-status").get_attribute("data-state") == "ready"
 
         exposed_text = " ".join(
             [
@@ -863,9 +907,9 @@ def test_unknown_model_error_does_not_invent_provider_guidance() -> None:
         page.get_by_role("button", name="开始循证分析").click()
 
         page.get_by_text("推荐优先采用低剂量方案").wait_for()
-        assert page.locator("#query-status").text_content() == "分析完成，共返回 1 项来源。"
+        assert page.locator("#query-status").text_content() == "综合完成，共返回 1 项来源。"
         assert page.locator("#query-status").get_attribute("data-state") == "ready"
-        assert page.locator("#report-model").text_content() == "确定性回退"
+        assert page.locator("#report-model").text_content() == "本地证据综合"
         browser.close()
 
 
@@ -889,21 +933,9 @@ def test_mobile_layout_has_no_horizontal_overflow_and_keeps_primary_action_visib
         browser.close()
 
 
-@pytest.mark.parametrize(
-    ("probe_completed", "expected"),
-    [
-        (False, {"confirm_embedding_cost": True, "embedding_limit": 32}),
-        (
-            True,
-            {
-                "confirm_embedding_cost": True,
-                "confirm_full_embedding_cost": True,
-            },
-        ),
-    ],
-)
-def test_embedding_continue_uses_two_distinct_confirmations(
-    probe_completed: bool, expected: dict
+@pytest.mark.parametrize("probe_completed", [False, True])
+def test_embedding_continue_starts_full_local_vectorization_without_probe(
+    probe_completed: bool,
 ) -> None:
     service = FakeWorkbenchService(probe_completed=probe_completed)
     with running_server(service) as base_url, sync_playwright() as playwright:
@@ -916,5 +948,9 @@ def test_embedding_continue_uses_two_distinct_confirmations(
         page.locator("#continue-kb").click()
         page.locator("#job-state").get_by_text("本地索引完成，等待向量化").wait_for()
 
-        assert service.last_build_payload == expected
+        assert service.last_build_payload == {
+            "confirm_embedding_cost": True,
+            "confirm_full_embedding_cost": True,
+            "stage": "embedding",
+        }
         browser.close()

@@ -47,6 +47,54 @@ def test_parser_keeps_page_numbers_and_avoids_ocr_for_text_pdf(tmp_path: Path) -
     assert calls == []
 
 
+def test_layout_extraction_reads_each_column_before_moving_to_the_next() -> None:
+    class TwoColumnPage:
+        rect = SimpleNamespace(width=600.0, height=800.0)
+
+        def get_text(self, kind: str, *, sort: bool) -> object:
+            if kind == "text":
+                return "legacy alternating extraction"
+            assert kind == "blocks"
+            assert sort is False
+            return [
+                (40, 20, 560, 45, "跨栏标题", 0, 0),
+                (40, 80, 270, 130, "左栏第一段包含足够多的正文字符用于识别双栏版面。", 1, 0),
+                (330, 85, 560, 135, "右栏第一段包含足够多的正文字符用于识别双栏版面。", 2, 0),
+                (40, 150, 270, 210, "左栏第二段应当紧跟左栏第一段而不是右栏第一段。", 3, 0),
+                (330, 155, 560, 215, "右栏第二段应当在左栏内容全部完成之后出现。", 4, 0),
+            ]
+
+    text = pdf_parser_module._layout_aware_page_text(TwoColumnPage())
+
+    assert text.index("跨栏标题") < text.index("左栏第一段")
+    assert text.index("左栏第一段") < text.index("左栏第二段")
+    assert text.index("左栏第二段") < text.index("右栏第一段")
+    assert text.index("右栏第一段") < text.index("右栏第二段")
+
+
+def test_layout_extraction_resets_column_order_after_cross_column_divider() -> None:
+    class SectionedPage:
+        rect = SimpleNamespace(width=600.0, height=800.0)
+
+        def get_text(self, kind: str, *, sort: bool) -> object:
+            if kind == "text":
+                return "legacy extraction"
+            return [
+                (40, 60, 270, 120, "上半页左栏正文内容足够长以建立双栏判断。", 1, 0),
+                (330, 60, 560, 120, "上半页右栏正文内容足够长以建立双栏判断。", 2, 0),
+                (40, 150, 560, 180, "跨栏小节标题", 3, 0),
+                (40, 210, 270, 270, "下半页左栏正文内容应先于下半页右栏内容。", 4, 0),
+                (330, 210, 560, 270, "下半页右栏正文内容应在最后读取。", 5, 0),
+            ]
+
+    text = pdf_parser_module._layout_aware_page_text(SectionedPage())
+
+    assert text.index("上半页左栏") < text.index("上半页右栏")
+    assert text.index("上半页右栏") < text.index("跨栏小节标题")
+    assert text.index("跨栏小节标题") < text.index("下半页左栏")
+    assert text.index("下半页左栏") < text.index("下半页右栏")
+
+
 def test_parser_uses_injected_ocr_only_for_empty_low_quality_page(tmp_path: Path) -> None:
     path = tmp_path / "scan.pdf"
     _save_pdf(path, [""])
